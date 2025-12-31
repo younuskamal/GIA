@@ -37,53 +37,63 @@ class TripleConsensusModel:
                 print(f"⚠️ Warning: Consensus model {name} missing at {path}")
 
     def _engineer_full_features(self, df_m15, df_m30, df_h1):
-        """Robust feature engineering that matches Backtest & Training exactly."""
+        """Standardized Feature Engineering: Matches v2_PRO Training & Backtest."""
         df = df_m15.copy()
         
         # 1. Merge MTF Data
-        # We assume df_m30 and df_h1 are already engineered with their suffixes
         df = pd.merge_asof(df.sort_values('date'), df_m30.sort_values('date'), on='date', direction='backward')
         df = pd.merge_asof(df, df_h1.sort_values('date'), on='date', direction='backward')
 
-        # 2. Market Regime (CRITICAL)
-        regime_engine = MarketRegimeEngine()
-        df = regime_engine.classify(df) # Adds 'regime_flag'
+        # 2. Market Regime
+        df = MarketRegimeEngine().classify(df)
 
-        # 3. Advanced V2 Features (Replicating FeatureFactory.construct)
+        # 3. Base Indicators Fixes
         close = df['close']
-        df['vol_20'] = df['close'].pct_change(1).rolling(20).std()
+        df['rsi_slope'] = df['rsi'].diff(3)
+        df['mom_5'] = close.pct_change(5)
+        df['mom_10'] = close.pct_change(10)
+        df['vol_20'] = close.pct_change(1).rolling(20).std()
         
-        # atr_norm & vol_regime
-        atr = df['atr'] if 'atr' in df.columns else df['close'].rolling(14).std()
-        df['atr_norm'] = atr / (df['close'] + 1e-6)
-        df['vol_regime'] = np.where(df['atr_norm'] > df['atr_norm'].rolling(100).mean(), 1, 0)
+        # MACD Norm (M15)
+        e12, e26 = close.ewm(span=12).mean(), close.ewm(span=26).mean()
+        df['macd_norm'] = (e12 - e26) / (close + 1e-6)
 
-        # Price Distances & Ribbon
-        for s in [9, 21, 50]:
-            ma = df['close'].rolling(s).mean()
-            df[f'ema_{s}_dist'] = (df['close'] - ma) / (ma + 1e-6)
+        # Bollinger Bounds
+        ma20 = close.rolling(20).mean()
+        std20 = close.rolling(20).std()
+        df['bb_width'] = (4 * std20) / (ma20 + 1e-6)
+        df['bb_pos'] = (close - (ma20 - 2*std20)) / (4*std20 + 1e-6)
+        df['price_dist_bb'] = (close - ma20) / (ma20 + 1e-6)
+
+        # 4. V2 Advanced Features
+        # Ribbon & Distances
+        for s in [9, 21, 50, 200]:
+            ma = close.rolling(s).mean()
+            df[f'ema_{s}_dist'] = (close - ma) / (ma + 1e-6)
+        df['ribbon_align'] = (np.sign(df['ema_21_dist']) + np.sign(df['ema_50_dist']) + np.sign(df.get('ema_200_dist', 0))) / 3.0
         
-        # Coiling & Velocity
-        ma20 = df['close'].rolling(20).mean()
-        std20 = df['close'].rolling(20).std()
-        bw = (4 * std20) / (ma20 + 1e-6)
+        # Dynamics
+        bw = df['bb_width']
         df['coiling'] = bw / (bw.rolling(50).mean() + 1e-6)
-        df['velocity'] = df['close'].diff(5) / (std20 + 1e-6)
+        df['velocity'] = close.diff(5) / (std20 + 1e-6)
+        df['vol_ratio'] = (df['vol_20'] / df['vol_20'].rolling(200).mean()).fillna(1.0)
+        df['vol_regime'] = np.where(df['vol_ratio'] > 1.2, 1, 0)
+        df['atr_norm'] = df['atr'] / (close + 1e-6)
         
         # Candle Geometry
-        df['body_rel'] = (df['close'] - df['open']).abs() / (df['close'].diff().abs().rolling(20).mean() + 1e-6)
-        df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['close'] + 1e-6)
-        df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (df['close'] + 1e-6)
+        avg_body = (df['close'] - df['open']).abs().rolling(20).mean()
+        df['body_rel'] = (df['close'] - df['open']).abs() / (avg_body + 1e-6)
+        df['body_size'] = (df['close'] - df['open']) / (df['open'] + 1e-6)
+        df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (close + 1e-6)
+        df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (close + 1e-6)
         df['wick_ratio'] = (df['upper_wick'] - df['lower_wick']) / (df['upper_wick'] + df['lower_wick'] + 1e-6)
 
-        # Sync Names
+        # Temporal & Harmony
         df['is_peak'] = ((df['date'].dt.hour >= 7) & (df['date'].dt.hour <= 22)).astype(int)
         df['is_peak_hour'] = df['is_peak']
+        df['trend_harmony'] = (np.sign(df['macd_norm']) + np.sign(df.get('macd_m30', 0)) + np.sign(df.get('macd_h1', 0))) / 3.0
         
-        # Distance to BB
-        df['price_dist_bb'] = (df['close'] - ma20) / (ma20 + 1e-6)
-        
-        # Stability
+        # Final Guard
         df = df.replace([np.inf, -np.inf], 0).fillna(0)
         return df
 

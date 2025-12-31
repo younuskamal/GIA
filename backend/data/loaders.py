@@ -125,8 +125,12 @@ def load_history_data(timeframe="H1", start_year=None, end_year=None):
         df = pd.read_csv(path)
         df.columns = [c.capitalize() for c in df.columns]
         
-        # Parse Dates
-        df['Date'] = pd.to_datetime(df['Time'], format='%m/%d/%Y %I:%M:%S %p')
+        # Parse Dates (Flexible for ISO or American formats)
+        df['Date'] = pd.to_datetime(df['Time'], errors='coerce')
+        
+        # If coerce failed for some older formats, try mixed
+        if df['Date'].isna().any():
+            df['Date'] = pd.to_datetime(df['Time'], format='mixed', dayfirst=False)
         df = df.drop(columns=['Time'])
         
         # Filter Years

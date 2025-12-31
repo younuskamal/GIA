@@ -67,9 +67,8 @@ class GoldAnalysisModel:
 
         # 2. Process Base Logic
         df_m15 = process_raw_data(raw_m15)
-        df_m15['mom_10'] = df_m15['close'].pct_change(10)
         
-        # 3. MTF Engineering (Side TFs)
+        # Side TFs Engineering
         def engineer_mtf(df, suffix):
             df = df.copy()
             processed = process_raw_data(df)
@@ -89,30 +88,51 @@ class GoldAnalysisModel:
         df_m30 = engineer_mtf(raw_m30, 'm30')
         df_h1 = engineer_mtf(raw_h1, 'h1')
 
-        # 4. Merge & Full V2 Engineering
+        # 3. Merge & Logic
         df = pd.merge_asof(df_m15.sort_values('date'), df_m30.sort_values('date'), on='date', direction='backward')
         df = pd.merge_asof(df, df_h1.sort_values('date'), on='date', direction='backward')
-
-        # Regime & V2 Specifics
         df = MarketRegimeEngine().classify(df)
         
+        # 4. Final V2 Engineering (Coordinated with Training)
         close = df['close']
-        df['atr_norm'] = df['atr'] / (close + 1e-6)
-        # vol_ratio: dynamic volatility stretch
-        avg_atr = df['atr_norm'].rolling(100).mean()
-        df['vol_ratio'] = df['atr_norm'] / (avg_atr + 1e-6)
+        df['rsi_slope'] = df['rsi'].diff(3)
+        df['mom_5'] = close.pct_change(5)
+        df['mom_10'] = close.pct_change(10)
+        df['vol_20'] = close.pct_change(1).rolling(20).std()
+        
+        e12, e26 = close.ewm(span=12).mean(), close.ewm(span=26).mean()
+        df['macd_norm'] = (e12 - e26) / (close + 1e-6)
+        
+        ma20, std20 = close.rolling(20).mean(), close.rolling(20).std()
+        df['bb_width'] = (4 * std20) / (ma20 + 1e-6)
+        df['bb_pos'] = (close - (ma20 - 2*std20)) / (4*std20 + 1e-6)
+        df['price_dist_bb'] = (close - ma20) / (ma20 + 1e-6)
+        
+        for s in [9, 21, 50, 200]:
+            ma = close.rolling(s).mean()
+            df[f'ema_{s}_dist'] = (close - ma) / (ma + 1e-6)
+        df['ribbon_align'] = (np.sign(df['ema_21_dist']) + np.sign(df['ema_50_dist']) + np.sign(df.get('ema_200_dist', 0))) / 3.0
+        
+        df['vol_ratio'] = (df['vol_20'] / df['vol_20'].rolling(200).mean()).fillna(1.0)
         df['vol_regime'] = np.where(df['vol_ratio'] > 1.2, 1, 0)
+        df['atr_norm'] = df['atr'] / (close + 1e-6)
         
-        df['is_peak_hour'] = ((df['date'].dt.hour >= 7) & (df['date'].dt.hour <= 22)).astype(int)
+        avg_body = (df['close'] - df['open']).abs().rolling(20).mean()
+        df['body_rel'] = (df['close'] - df['open']).abs() / (avg_body + 1e-6)
+        df['body_size'] = (df['close'] - df['open']) / (df['open'] + 1e-6)
+        df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (close + 1e-6)
+        df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (close + 1e-6)
+        df['wick_ratio'] = (df['upper_wick'] - df['lower_wick']) / (df['upper_wick'] + df['lower_wick'] + 1e-6)
         
-        ma20 = df['close'].rolling(20).mean()
-        df['price_dist_bb'] = (df['close'] - ma20) / (ma20 + 1e-6)
-        
-        # Stability
-        df = df.replace([np.inf, -np.inf], 0).fillna(0)
-        
-        return df.tail(10)
+        df['coiling'] = df['bb_width'] / (df['bb_width'].rolling(50).mean() + 1e-6)
+        df['velocity'] = close.diff(5) / (std20 + 1e-6)
+        df['is_peak'] = ((df['date'].dt.hour >= 7) & (df['date'].dt.hour <= 22)).astype(int)
+        df['is_peak_hour'] = df['is_peak']
+        df['trend_harmony'] = (np.sign(df['macd_norm']) + np.sign(df.get('macd_m30', 0)) + np.sign(df.get('macd_h1', 0))) / 3.0
 
+        df = df.replace([np.inf, -np.inf], 0).fillna(0)
+        return df.tail(10)
+        
     def analyze_market(self, df: pd.DataFrame) -> Dict:
         """
         Analyzes the provided dataframe (assumes features are present).

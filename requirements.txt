@@ -1,0 +1,10 @@
+pandas
+numpy
+joblib
+xgboost
+colorama
+twisted
+ctrader-open-api
+scikit-learn
+matplotlib
+ta-lib

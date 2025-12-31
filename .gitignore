@@ -1,0 +1,64 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 🦁 GIA Models (Proprietary - Do not upload)
+backend/models/*.pkl
+backend/models/*.h5
+backend/models/*.json
+*.pkl
+*.h5
+
+# 🔐 Sensitive Info
+config/secrets.py
+.env
+auth.json
+
+# 📊 Data & Results (Proprietary Data & Sim Results)
+backend/results/**
+results/**
+backend/data/cache/**
+backend/data/history/**
+data/**
+GIA_DATA/**
+C:/GIA_DATA/**
+*.log
+*.csv
+*.xlsx
+*.json
+!requirements.txt
+!package.json
+!composer.json
+active_trading.log
+trades_history.json
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific
+.DS_Store
+Thumbs.db

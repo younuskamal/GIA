@@ -95,42 +95,64 @@ class FeatureFactory:
             # Momentum
             if f == 'rsi': df['rsi'] = FeatureFactory._rsi(df['close'])
             elif f == 'rsi_slope': df['rsi_slope'] = FeatureFactory._rsi(df['close']).diff(3)
+            elif f == 'momentum': df['momentum'] = df['close'].diff(5) / (df['close'].shift(5) + 1e-9)
+            elif f == 'change': df['change'] = df['close'].pct_change()
             elif f.startswith('mom_'):
                 lookback = 5
                 if '3' in f: lookback = 3
                 elif '10' in f: lookback = 10
                 elif 'weekly' in f: lookback = 120
                 elif 'monthly' in f: lookback = 480
-                df[f] = df['close'].diff(lookback) / df['close']
+                df[f] = df['close'].diff(lookback) / (df['close'] + 1e-9)
             
             # Structural
             elif f.startswith('ema_') and '_dist' in f:
                 span = int(f.split('_')[1])
                 ema = df['close'].ewm(span=span, adjust=False).mean()
-                df[f] = (df['close'] - ema) / ema
+                df[f] = (df['close'] - ema) / (ema + 1e-9)
+            elif f == 'ema_dist':
+                ema = df['close'].ewm(span=20, adjust=False).mean()
+                df['ema_dist'] = (df['close'] - ema) / (ema + 1e-9)
+            elif f == 'sma_dist':
+                sma = df['close'].rolling(20).mean()
+                df['sma_dist'] = (df['close'] - sma) / (sma + 1e-9)
                 
             elif f == 'bb_width':
                 ma = df['close'].rolling(20).mean()
                 std = df['close'].rolling(20).std()
-                df['bb_width'] = (4 * std) / ma
+                df['bb_width'] = (4 * std) / (ma + 1e-9)
             elif f == 'bb_pos':
                 ma = df['close'].rolling(20).mean()
                 std = df['close'].rolling(20).std()
-                df['bb_pos'] = (df['close'] - (ma - 2*std)) / (4*std)
+                df['bb_pos'] = (df['close'] - (ma - 2*std)) / (4*std + 1e-9)
             
             elif f == 'macd_norm':
                 e12 = df['close'].ewm(span=12, adjust=False).mean()
                 e26 = df['close'].ewm(span=26, adjust=False).mean()
-                df['macd_norm'] = (e12 - e26) / df['close']
+                df['macd_norm'] = (e12 - e26) / (df['close'] + 1e-9)
+            
+            # Volatility
+            elif f == 'volatility':
+                df['volatility'] = df['close'].pct_change().rolling(20).std()
+            elif f == 'vol_change':
+                v = df['close'].pct_change().rolling(20).std()
+                df['vol_change'] = v.pct_change()
+            elif f == 'rsi_slope':
+                if 'rsi' not in df.columns: df['rsi'] = FeatureFactory._rsi(df['close'])
+                df['rsi_slope'] = df['rsi'].diff(3)
+            elif f == 'momentum':
+                df['momentum'] = df['close'].pct_change(5)
             
             # Candle Morphology
+            elif f == 'body_ratio':
+                 df['body_ratio'] = (df['close'] - df['open']).abs() / (df['high'] - df['low'] + 1e-9)
+            elif f == 'wick_ratio':
+                 u = (df['high'] - df[['open', 'close']].max(axis=1))
+                 l = (df[['open', 'close']].min(axis=1) - df['low'])
+                 df['wick_ratio'] = u / (l + 1e-9)
             elif f == 'body_size': df['body_size'] = (df['close'] - df['open']).abs() / (df['close'] + 1e-6)
             elif f == 'upper_wick': df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['close'] + 1e-6)
             elif f == 'lower_wick': df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (df['close'] + 1e-6)
-            elif f == 'wick_ratio':
-                u = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['close'] + 1e-6)
-                l = (df[['open', 'close']].min(axis=1) - df['low']) / (df['close'] + 1e-6)
-                df['wick_ratio'] = (u - l) / (u + l + 1e-6)
             
             # Special & Structural
             elif f == 'regime_flag':
@@ -148,18 +170,17 @@ class FeatureFactory:
             elif f == 'vol_regime':
                 v20 = df['close'].rolling(20).std()
                 df['vol_regime'] = (v20 / (v20.rolling(200).mean() + 1e-6)).fillna(1.0)
-            elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour']:
+            elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour', 'session_london', 'session_ny']:
                 hour = df['date'].dt.hour
                 df['is_london'] = ((hour >= 8) & (hour <= 16)).astype(int)
                 df['is_ny'] = ((hour >= 13) & (hour <= 21)).astype(int)
+                df['session_london'] = df['is_london']
+                df['session_ny'] = df['is_ny']
                 df['is_peak'] = ((hour >= 7) & (hour <= 21)).astype(int)
                 df['is_peak_hour'] = df['is_peak']
-            elif f == 'body_rel':
-                avg_body = (df['close'] - df['open']).abs().rolling(20).mean()
-                df['body_rel'] = (df['close'] - df['open']).abs() / (avg_body + 1e-6)
             elif f == 'velocity':
                 v20 = df['close'].rolling(20).std()
-                df['velocity'] = df['close'].diff(5) / (v20 + 1e-6)
+                df['velocity'] = df['close'].diff(5) / (v20 + 1e-9)
             elif f == 'coiling':
                 ma = df['close'].rolling(20).mean()
                 std = df['close'].rolling(20).std()
@@ -311,6 +332,7 @@ class BattleArena:
     def __init__(self):
         self.data_dir = os.path.join(os.getcwd(), 'backend', 'hestory')
         self.models_dir = os.path.join(os.getcwd(), 'backend', 'models')
+        self.pro_models_dir = os.path.join(os.getcwd(), 'GIA_SIGNAL_PRO', 'models')
         self.cache = {}
 
     def _calculate_extended_stats(self, res):
@@ -352,26 +374,33 @@ class BattleArena:
             end_y = cli_args.to_year + 1
         else:
             # --- PROFESSIONAL DASHBOARD REPLACEMENT ---
-            models = sorted([f for f in os.listdir(self.models_dir) if f.endswith('.pkl')])
-            
-            print(f"\n{Fore.CYAN}╔════════════════════════════════════════════════════════╗")
-            print(f"║ {Fore.WHITE}      🦁 GIA COMMAND CENTER - BACKTEST SETUP         {Fore.CYAN}║")
-            print(f"╚════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
-            
             # 1. Model Selection
             print(f"\n {Fore.YELLOW}STEP 1: SELECT YOUR AI MODEL{Style.RESET_ALL}")
-            for i, m in enumerate(models):
-                print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25}")
+            
+            # Combine models from both directories
+            models_main = sorted([f for f in os.listdir(self.models_dir) if f.endswith('.pkl')])
+            models_pro = sorted([f for f in os.listdir(self.pro_models_dir) if f.endswith('.pkl')]) if os.path.exists(self.pro_models_dir) else []
+            
+            # Store full paths associated with filenames
+            self.model_paths = {m: os.path.join(self.models_dir, m) for m in models_main}
+            for m in models_pro:
+                self.model_paths[m] = os.path.join(self.pro_models_dir, m)
+            
+            all_models = sorted(list(self.model_paths.keys()))
+            
+            for i, m in enumerate(all_models):
+                dir_label = "[PRO]" if m in models_pro else "[CORE]"
+                print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {Fore.LIGHTBLACK_EX}{dir_label}{Style.RESET_ALL}")
             print(f"  [{Fore.GREEN}A{Style.RESET_ALL}] COMPARE ALL MODELS")
             
             choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
-            targets = models if choice == 'A' else [models[int(choice)-1]] if (choice.isdigit() and int(choice) <= len(models)) else [models[0]]
+            targets = all_models if choice == 'A' else [all_models[int(choice)-1]] if (choice.isdigit() and int(choice) <= len(all_models)) else [all_models[0]]
 
             # 2. Timeframe
             print(f"\n {Fore.YELLOW}STEP 2: SELECT EXECUTION TIMEFRAME{Style.RESET_ALL}")
-            print(f"  [{Fore.GREEN}1{Style.RESET_ALL}] M15 (Tactical)  [{Fore.GREEN}2{Style.RESET_ALL}] M30 (Balanced)  [{Fore.GREEN}3{Style.RESET_ALL}] H1 (Strategic)")
-            tf_choice = input(f"\n {Fore.WHITE}Enter Selection [1] > {Style.RESET_ALL}").strip() or "1"
-            tf = {"1":"M15", "2":"M30", "3":"H1"}.get(tf_choice, "M15")
+            print(f"  [{Fore.GREEN}0{Style.RESET_ALL}] M1 (Scalping)   [{Fore.GREEN}1{Style.RESET_ALL}] M15 (Tactical)  [{Fore.GREEN}2{Style.RESET_ALL}] M30 (Balanced)  [{Fore.GREEN}3{Style.RESET_ALL}] H1 (Strategic)")
+            tf_choice = input(f"\n {Fore.WHITE}Enter Selection [Default M15] > {Style.RESET_ALL}").strip() or "1"
+            tf = {"0":"M1", "1":"M15", "2":"M30", "3":"H1"}.get(tf_choice, "M15")
 
             # 3. Environment & Risk (Streamlined)
             print(f"\n {Fore.YELLOW}STEP 3: BROKER PHYSICS{Style.RESET_ALL}")
@@ -405,7 +434,10 @@ class BattleArena:
             
             if cfg_choice == "C":
                 capital = float(input(f"  {Fore.WHITE}Balance > {Style.RESET_ALL}") or 10000)
-                risk = float(input(f"  {Fore.WHITE}Risk % (if dynamic) > {Style.RESET_ALL}") or 1.0)
+                if sizing_mode == "dynamic":
+                    risk = float(input(f"  {Fore.WHITE}Risk % > {Style.RESET_ALL}") or 1.0)
+                else:
+                    risk = 1.0 # Default fallback, not used for fixed
                 start_y = int(input(f"  {Fore.WHITE}Start Year > {Style.RESET_ALL}") or 2024)
                 end_y = int(input(f"  {Fore.WHITE}End Year > {Style.RESET_ALL}") or 2025)
                 end_y += 1
@@ -424,13 +456,24 @@ class BattleArena:
             print(f"🦁 {Fore.WHITE}ENGINEERING: {Fore.YELLOW}{m_name}{Style.RESET_ALL} | {Fore.CYAN}{tf}{Style.RESET_ALL}")
             
             try:
-                path = os.path.join(self.models_dir, m_name)
+                # Resolve Path
+                if hasattr(self, 'model_paths'):
+                    path = self.model_paths.get(m_name, os.path.join(self.models_dir, m_name))
+                else:
+                    # Fallback for CLI args
+                    path = os.path.join(self.pro_models_dir, m_name) if 'SIGNAL_PRO' in m_name else os.path.join(self.models_dir, m_name)
+                
                 m_data = joblib.load(path)
-                req_feats = m_data.get('feature_columns', [])
+                req_feats = m_data.get('feature_columns', m_data.get('features', []))
+                
+                # Intelligent Timeframe Detection: if SIGNAL_PRO is used, M1 is usually the core.
+                if 'SIGNAL_PRO' in m_name and not cli_args:
+                    tf = "M1"
                 
                 # Data Load
-                needs_multi = any(('_h1' in f or '_m30' in f or f == 'trend_harmony') for f in req_feats)
-                df = self._load_data(tf, needs_multi)
+                # GIA_SIGNAL_PRO needs m5, m15, h1 context
+                needs_mtf = any(('_h1' in f or '_m15' in f or '_m5' in f or '_m30' in f or 'trend_harmony' in f) for f in req_feats)
+                df = self._load_data(tf, needs_mtf)
                 df = df[(df['date'].dt.year >= start_y) & (df['date'].dt.year <= end_y)].copy()
                 
                 if len(df) < 100:
@@ -527,10 +570,30 @@ class BattleArena:
         print(f"   📂 Loading {primary_tf} History...")
         df_p = self._read_csv(f'XAUUSD_{primary_tf}.csv')
         if needs_multi:
-            m30 = self._engineer_secondary(self._read_csv('XAUUSD_M30.csv'), 'm30')
-            h1 = self._engineer_secondary(self._read_csv('XAUUSD_H1.csv'), 'h1')
-            merged = pd.merge_asof(df_p.sort_values('date'), m30.sort_values('date'), on='date', direction='backward')
-            merged = pd.merge_asof(merged.sort_values('date'), h1.sort_values('date'), on='date', direction='backward')
+            # Context list depends on what's available and needed
+            contexts = []
+            if primary_tf != "M5": contexts.append(('m5', 'XAUUSD_M1.csv')) # M1 resampled to M5
+            if primary_tf != "M15": contexts.append(('m15', 'XAUUSD_M15.csv'))
+            if primary_tf not in ["M30", "M30"]: contexts.append(('m30', 'XAUUSD_M30.csv'))
+            if primary_tf != "H1": contexts.append(('h1', 'XAUUSD_H1.csv'))
+            
+            merged = df_p.sort_values('date')
+            for suffix, filename in contexts:
+                try:
+                    if suffix == 'm5' and filename == 'XAUUSD_M1.csv':
+                        # Special Resample for M1 to M5
+                        df_m1 = self._read_csv(filename)
+                        df_sec = df_m1.set_index('date').resample('5min').agg({
+                            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+                        }).dropna().reset_index()
+                    else:
+                        df_sec = self._read_csv(filename)
+                    
+                    eng_sec = self._engineer_secondary(df_sec, suffix)
+                    merged = pd.merge_asof(merged, eng_sec.sort_values('date'), on='date', direction='backward')
+                except Exception as e:
+                    print(f"   ⚠️  Could not load context {suffix}: {e}")
+            
             self.cache[key] = merged.dropna()
         else:
             self.cache[key] = df_p
@@ -548,15 +611,23 @@ class BattleArena:
         df[f'rsi_{suffix}'] = FeatureFactory._rsi(df['close'])
         e12 = df['close'].ewm(span=12, adjust=False).mean()
         e26 = df['close'].ewm(span=26, adjust=False).mean()
-        df[f'macd_{suffix}'] = (e12 - e26) / df['close']
+        df[f'macd_{suffix}'] = (e12 - e26) / (df['close'] + 1e-9)
         ma = df['close'].rolling(20).mean()
         std = df['close'].rolling(20).std()
-        df[f'bb_width_{suffix}'] = (4 * std) / ma
+        df[f'bbw_{suffix}'] = (4 * std) / (ma + 1e-9)
+        df[f'vol_{suffix}'] = df['close'].pct_change().rolling(20).std()
+        
+        # Trend detection logic
         if suffix == 'h1':
             ema200 = df['close'].ewm(span=200, adjust=False).mean()
-            df[f'ema_200_dist_h1'] = (df['close'] - ema200) / df['close']
-            df['mom_h1'] = df['close'].diff(4) / df['close']
+            df[f'ema_dist_h1'] = (df['close'] - ema200) / (df['close'] + 1e-9)
+            df['mom_h1'] = df['close'].diff(4) / (df['close'] + 1e-9)
             df['trend_h1'] = np.where(df['close'] > ema200, 1, -1)
+        else:
+            # Generic trend for M30, M15, M5
+            ma20 = df['close'].rolling(20).mean()
+            df[f'trend_{suffix}'] = np.where(df['close'] > ma20, 1, -1)
+            
         return df[['date'] + [c for c in df.columns if c.endswith(suffix)]]
 
     def _run_consensus(self, args):

@@ -8,3 +8,5 @@ ctrader-open-api
 scikit-learn
 matplotlib
 ta-lib
+python-dotenv
+requests

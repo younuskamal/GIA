@@ -33,16 +33,26 @@ CSV_PATH = r"C:\GIA_DATA\XAUUSD_M15.csv"
 READY_FILE = r"C:\GIA_DATA\XAUUSD_M15.ready"
 
 def run_production_engine():
-    models_dir = os.path.join(BASE_DIR, 'backend', 'models')
-    models = sorted([f for f in os.listdir(models_dir) if f.endswith('.pkl')])
+    models_main_dir = os.path.join(BASE_DIR, 'backend', 'models')
+    models_pro_dir = os.path.join(BASE_DIR, 'GIA_SIGNAL_PRO', 'models')
+    
+    models_main = sorted([f for f in os.listdir(models_main_dir) if f.endswith('.pkl')])
+    models_pro = sorted([f for f in os.listdir(models_pro_dir) if f.endswith('.pkl')]) if os.path.exists(models_pro_dir) else []
+    
+    model_paths = {m: os.path.join(models_main_dir, m) for m in models_main}
+    for m in models_pro:
+        model_paths[m] = os.path.join(models_pro_dir, m)
+    
+    all_models = sorted(list(model_paths.keys()))
     
     print(f"\n{Fore.CYAN}╔════════════════════════════════════════════════════════╗")
     print(f"║ {Fore.WHITE}      🦁 GIA LIVE COMMAND CENTER - DEMO API          {Fore.CYAN}║")
     print(f"╚════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
     
     print(f"\n {Fore.YELLOW}SELECT EXECUTION MODE:{Style.RESET_ALL}")
-    for i, m in enumerate(models):
-        print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25}")
+    for i, m in enumerate(all_models):
+        dir_label = "[PRO]" if "SIGNAL_PRO" in m else "[CORE]"
+        print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {Fore.LIGHTBLACK_EX}{dir_label}{Style.RESET_ALL}")
     print(f"  [{Fore.GREEN}C{Style.RESET_ALL}] TRIPLE CONSENSUS (v14 + v2_PRO + v2_FLASH)")
     
     choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
@@ -51,13 +61,14 @@ def run_production_engine():
     is_consensus = False
     
     if choice == 'C':
-        analyzer = TripleConsensusModel(models_dir)
+        analyzer = TripleConsensusModel(models_main_dir)
         is_consensus = True
         if len(analyzer.models) < 3:
-            print(f"{Fore.RED}❌ Error: Consensus requires all 3 models in {models_dir}{Style.RESET_ALL}")
+            print(f"{Fore.RED}❌ Error: Consensus requires all 3 models in {models_main_dir}{Style.RESET_ALL}")
             return
-    elif choice.isdigit() and 1 <= int(choice) <= len(models):
-        m_path = os.path.join(models_dir, models[int(choice)-1])
+    elif choice.isdigit() and 1 <= int(choice) <= len(all_models):
+        m_name = all_models[int(choice)-1]
+        m_path = model_paths[m_name]
         analyzer = GoldAnalysisModel(model_path=m_path)
     else:
         print(f"{Fore.RED}❌ Invalid selection.{Style.RESET_ALL}")
@@ -183,17 +194,17 @@ def run_production_engine():
                         else:
                             print(f"   {Fore.RED}⚠️ Analysis Error: {res.get('error')}{Style.RESET_ALL}")
 
-                    # 4. Mandatory Cleanup of ALL .ready files
-                    for rf in [f for f in os.listdir(data_folder) if f.endswith('.ready')]:
-                        try: 
-                            os.remove(os.path.join(data_folder, rf))
-                            print(f"   🧹 Cleaned: {rf}")
+                    # 4. Surgical Cleanup of M15 ready file
+                    if os.path.exists(m15_ready_path):
+                        try:
+                            os.remove(m15_ready_path)
+                            print(f"   🧹 Cleaned: XAUUSD_M15.ready")
                         except: pass
                 else:
                     print(f"   ❌ [SYNC ERROR] Latest M15 timestamp rejected or duplicate. Skipping cycle.")
-                    # Still clean up to avoid loop
-                    for rf in [f for f in os.listdir(data_folder) if f.endswith('.ready')]:
-                        try: os.remove(os.path.join(data_folder, rf))
+                    # Still clean up M15 to avoid infinite loop on rejected TS
+                    if os.path.exists(m15_ready_path):
+                        try: os.remove(m15_ready_path)
                         except: pass
 
             if time.time() - last_check_time > 1200: # 20 mins monitor

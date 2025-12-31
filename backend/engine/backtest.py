@@ -61,7 +61,9 @@ class BacktestEngine:
             y_pred_probs = external_signals['probs']
             external_sizing = external_signals.get('sizing', None) # New: per-trade size multiplier
         elif self.model_data:
-            feature_cols = self.model_data['feature_columns']
+            # Flexible feature key detection
+            feature_cols = self.model_data.get('feature_columns', self.model_data.get('features', []))
+            
             # Check availability
             available_feats = [f for f in feature_cols if f in df.columns]
             if len(available_feats) < len(feature_cols):
@@ -69,9 +71,23 @@ class BacktestEngine:
                 return {"error": f"Dataset missing features: {missing}"}
                 
             probs = self.model_data['model'].predict_proba(df[feature_cols])
+            
+            # 🦁 Calibrator Integration (v3.0+)
+            if 'calibrator' in self.model_data:
+                probs = self.model_data['calibrator'].calibrate(probs)
+                
             y_pred_probs = np.max(probs, axis=1)
             y_pred_idx = np.argmax(probs, axis=1)
-            y_pred_labels = self.model_data['label_encoder'].inverse_transform(y_pred_idx)
+            
+            # Encoder Support
+            encoder = self.model_data.get('label_encoder', self.model_data.get('encoder'))
+            if encoder:
+                y_pred_labels = encoder.inverse_transform(y_pred_idx)
+            else:
+                # Fallback mapping
+                mapping = {0: 'WAIT', 1: 'BUY', 2: 'SELL'}
+                y_pred_labels = [mapping.get(i, 'WAIT') for i in y_pred_idx]
+                
             external_sizing = None
         else:
             # Fallback for "Strategy Only" testing without ML component (rare)
@@ -183,6 +199,7 @@ class BacktestEngine:
                         'entry': position['entry_price'],
                         'exit': real_exit_price,
                         'pnl_net': pnl, # Comm deducted on entry
+                        'confidence': position.get('confidence', 0),
                         'reason': exit_reason
                     })
                     
@@ -321,6 +338,7 @@ class BacktestEngine:
                         'lots': lots,
                         'sl': sl_price,
                         'tp': tp_price,
+                        'confidence': conf,
                         'entry_time': current_date
                     }
             

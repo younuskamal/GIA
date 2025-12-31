@@ -174,33 +174,36 @@ class GoldAnalysisModel:
 
     def analyze(self) -> Dict:
         """Unified analysis unit that mirrors the Backtest decision pipeline."""
-        from backend.data.loaders import fetch_real_gold_data
-        from backend.data.processor import process_raw_data
+        # 1. Fetch & Engineer Full Features (MTF)
+        df_full = self.get_features() # This already fetches M15, M30, H1 and engineers all features
         
-        # 1. Fetch Raw M15 Data
-        raw_df = fetch_real_gold_data(interval='15m')
-        if raw_df is None or len(raw_df) < 500: 
-            return {"success": False, "error": "Insufficient history for M15 Analysis"}
+        if df_full is None or df_full.empty:
+            return {"success": False, "error": "Insufficient history or feature engineering failure"}
             
-        # 2. Process Features (Backtest standard)
-        df_processed = process_raw_data(raw_df)
-        if df_processed is None or df_processed.empty: 
-            return {"success": False, "error": "Feature Engineering Failed"}
-        
-        # 3. Model Inference
+        # 2. Model Inference
         feature_cols = self.model_data['feature_columns']
-        latest = df_processed.tail(1)
+        latest = df_full.tail(1)
         
+        # Check mapping for features
+        missing = [c for c in feature_cols if c not in latest.columns]
+        if missing:
+            return {"success": False, "error": f"Model requires features missing in latest data: {missing}"}
+            
         probs = self.model_data['model'].predict_proba(latest[feature_cols])[0]
         confidence = float(np.max(probs))
         pred_idx = int(np.argmax(probs))
-        raw_signal = self.model_data['label_encoder'].inverse_transform([pred_idx])[0]
         
-        # 4. Strategy Analysis Unit (ATR & Context)
-        atr_val = df_processed['atr'].iloc[-1] if 'atr' in df_processed.columns else 0.0
-        ctx = {"news_impact_score": df_processed['news_impact_score'].iloc[-1]}
+        # Multi-model encoder support
+        encoder = self.model_data.get('label_encoder', self.model_data.get('encoder'))
+        raw_signal = encoder.inverse_transform([pred_idx])[0]
         
-        # Decision via StrategyHandler (Mirroring rules applied in backtest)
+        # 3. Strategy Analysis Unit (ATR & Context)
+        atr_val = df_full['atr'].iloc[-1] if 'atr' in df_full.columns else 0.0
+        # News impact is optional
+        news_score = df_full['news_impact_score'].iloc[-1] if 'news_impact_score' in df_full.columns else 0
+        ctx = {"news_impact_score": news_score}
+        
+        # Decision via StrategyHandler
         decision_pkg = self.strategy.apply_strategy(raw_signal, confidence, ctx)
         
         return {
@@ -209,6 +212,6 @@ class GoldAnalysisModel:
             "confidence": confidence,
             "raw_prediction": raw_signal,
             "atr": atr_val,
-            "timestamp": df_processed['date'].iloc[-1],
+            "timestamp": df_full['date'].iloc[-1],
             "explanation": decision_pkg['explanation']
         }

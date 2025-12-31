@@ -195,6 +195,8 @@ class TelegramSignalNotifier:
             
         success_flag = False
         expiry_ts = time.time() + (5 * 60) # 5 Minutes validity
+        target_count = len(self.subscribers)
+        logger.info(f"📡 Broadcasting to {target_count} subscribers...")
         
         for chat_id in list(self.subscribers):
             try:
@@ -203,6 +205,7 @@ class TelegramSignalNotifier:
                 r = requests.post(url, json=payload, timeout=10).json()
                 
                 if r.get("ok"):
+                    logger.info(f"   ✅ Sent successfully to {chat_id}")
                     success_flag = True
                     if is_signal:
                         message_id = r["result"]["message_id"]

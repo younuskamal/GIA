@@ -56,11 +56,13 @@ def main():
                     ts = res['timestamp']
                     
                     if conf >= MIN_CONFIDENCE:
-                        print(f"\n🚀 {Fore.GREEN}SIGNAL CONFIRMED: {direction} ({conf}%) at {ts}")
+                        print(f"\n🚀 {Fore.GREEN}SIGNAL ATTEMPT: {direction} ({conf}%) at {ts}")
                         price_val = res.get('price', 0)
                         sent = notifier.send_signal(direction, conf, ts, price_val)
-                        if sent: print(f"   {Fore.BLUE}📨 Telegram: Dispatched.")
-                        else: print(f"   {Fore.RED}⚠️ Telegram: Dispatch Failed.")
+                        if sent: print(f"   {Fore.BLUE}📨 Telegram: Dispatched to subscribers.")
+                        else: print(f"   {Fore.RED}⚠️ Telegram: Dispatch Failed (Check connectivity/subscribers).")
+                    else:
+                        print(f"{Fore.YELLOW}📡 Logic: Signal detected ({direction}) but confidence ({conf}%) < threshold ({MIN_CONFIDENCE}%)")
                 
                 # Visual Feedback
                 now = datetime.now().strftime("%H:%M:%S")

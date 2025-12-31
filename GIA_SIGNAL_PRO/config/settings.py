@@ -42,9 +42,9 @@ MODELS_DIR = BASE_DIR / "models"
 MODEL_PATH = MODELS_DIR / "GIA_SIGNAL_PRO.pkl"
 
 # 🧠 Logic
-MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", 75))
-ATR_THRESHOLD = float(os.getenv("ATR_THRESHOLD", 2.5))
-SIGNAL_HORIZON = int(os.getenv("SIGNAL_HORIZON", 48))
+MIN_CONFIDENCE = 20 # FORCED NUCLEAR HYPER-SCALPING MODE
+ATR_THRESHOLD = float(os.getenv("ATR_THRESHOLD", 1.5))
+SIGNAL_HORIZON = int(os.getenv("SIGNAL_HORIZON", 15))
 
 # Ensure folders exist
 os.makedirs(MODELS_DIR, exist_ok=True)

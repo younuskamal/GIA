@@ -32,6 +32,8 @@ class TelegramSignalNotifier:
         self.api_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.subscribers = self._load_subscribers()
         self.last_update_id = 0
+        self.sent_messages = [] # Track: (chat_id, message_id, expiry_ts)
+        self.lock = threading.Lock()
         
         if not self.bot_token or self.bot_token == "YOUR_BOT_TOKEN_HERE":
             logger.warning("⚠️ TELEGRAM_BOT_TOKEN is missing. Bot mode disabled.")
@@ -54,10 +56,10 @@ class TelegramSignalNotifier:
             logger.error(f"❌ Error saving subscribers: {e}")
 
     def start_listener(self):
-        """Starts a background thread to listen for /start and /stop commands."""
-        thread = threading.Thread(target=self._polling_loop, daemon=True)
-        thread.start()
-        logger.info("📡 Telegram Bot Listener started...")
+        """Starts background threads for listener and cleanup."""
+        threading.Thread(target=self._polling_loop, daemon=True).start()
+        threading.Thread(target=self._cleanup_loop, daemon=True).start()
+        logger.info("📡 Telegram Bot Listener & Cleanup Engine started...")
 
     def _polling_loop(self):
         while True:
@@ -101,6 +103,27 @@ class TelegramSignalNotifier:
             except Exception as e:
                 time.sleep(5)
 
+    def _cleanup_loop(self):
+        """Background worker to delete expired signals (The 'Self-Cleaning' Logic)."""
+        while True:
+            try:
+                now = time.time()
+                with self.lock:
+                    to_delete = [m for m in self.sent_messages if now >= m['expiry']]
+                    self.sent_messages = [m for m in self.sent_messages if now < m['expiry']]
+
+                for msg in to_delete:
+                    try:
+                        url = f"{self.api_url}/deleteMessage"
+                        payload = {"chat_id": msg['chat_id'], "message_id": msg['message_id']}
+                        requests.post(url, json=payload, timeout=5)
+                    except: pass
+                
+                time.sleep(30) # Check every 30 seconds
+            except Exception as e:
+                logger.error(f"⚠️ Cleanup error: {e}")
+                time.sleep(10)
+
     def _send_text(self, chat_id, text):
         try:
             url = f"{self.api_url}/sendMessage"
@@ -119,7 +142,7 @@ class TelegramSignalNotifier:
             f"----------------------------------\n"
             f"� <i>نحن الآن نراقب السيولة لاقتناص أقوى الفرص...</i>"
         )
-        self.broadcast_message(message)
+        self.broadcast_message(message, is_signal=False)
 
     def send_shutdown_message(self):
         """Broadcasts shutdown message to all subscribers."""
@@ -131,37 +154,70 @@ class TelegramSignalNotifier:
             f"----------------------------------\n"
             f"🕒 {datetime.now().strftime('%Y-%m-%d | %H:%M:%S')}"
         )
-        self.broadcast_message(message)
+        self.broadcast_message(message, is_signal=False)
 
-    def send_signal(self, direction, confidence, signal_time=None):
+    def send_signal(self, direction, confidence, signal_time=None, price=0):
         """Broadcasts a high-confidence signal to all subscribers."""
         if signal_time is None:
-            signal_time = datetime.now().strftime('%Y-%m-%d %H:%M')
+            signal_time = datetime.now().strftime('%H:%M:%S')
         
         dir_ar = "🔵 شراء (BUY)" if direction == "BUY" else "🔴 بيع (SELL)"
         
-        # FINAL Professional Hybrid Format
+        # Visual Confidence Meter
+        filled = int(confidence / 10)
+        meter = "█" * filled + "░" * (10 - filled)
+        
+        # ULTRA-PREMIUM Layout
         message = (
-            f"⚡ <b>GIA SIGNAL PRO</b>\n"
-            f"----------------------------------\n"
-            f"💎 <b>الأداة:</b> {ASSET}\n"
-            f"⏱️ <b>الفريم:</b> {TIMEFRAME} (سكالبينج)\n"
-            f"🚀 <b>الاتجاه:</b> {dir_ar}\n"
-            f"📊 <b>مستوى الثقة:</b> {confidence}%\n"
-            f"🕒 <b>التوقيت:</b> {signal_time} ({TIMEZONE})\n"
-            f"----------------------------------\n"
-            f"🦁 <i>التحليلات المؤسساتية - دقة الصفر خطأ</i>"
+            f"🚀 <b>GIA APEX | إشارة سكالبينج ذهبية</b> ⚡\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"💎 <b>الأداة:</b> <code>{ASSET}</code>\n"
+            f"⏱️ <b>الفريم:</b> <code>M1 (Hyper-Scalp)</code>\n"
+            f"� <b>النوع:</b> <b>{dir_ar}</b>\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"� <b>سعر الدخول:</b> <code>{price:.2f}</code>\n"
+            f"📊 <b>قوة الإشارة:</b> [<code>{meter}</code>] {confidence}%\n"
+            f"🕒 <b>وقت الدخول:</b> <code>{signal_time}</code>\n"
+            f"⏳ <b>صلاحية الإشارة:</b> <u>5 دقائق فقط</u>\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🎯 <b>الهدف (TP):</b> <code>+1.50$</code> (15 Pips)\n"
+            f"🛑 <b>الوقف (SL):</b> <code>-2.00$</code> (20 Pips)\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"⚠️ <i>تحذير: لا تدخل الصفقة إذا تغير السعر كثيراً.</i>\n"
+            f"🦁 <b>GIA SIGNAL PRO | Institutional Sniper</b>"
         )
-        self.broadcast_message(message)
+        return self.broadcast_message(message)
 
-    def broadcast_message(self, text):
+    def broadcast_message(self, text, is_signal=True):
+        if not self.subscribers:
+            logger.warning("⚠️ No subscribers found. Message not sent.")
+            return False
+            
+        success_flag = False
+        expiry_ts = time.time() + (5 * 60) # 5 Minutes validity
+        
         for chat_id in list(self.subscribers):
             try:
                 url = f"{self.api_url}/sendMessage"
                 payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
-                requests.post(url, json=payload, timeout=5)
+                r = requests.post(url, json=payload, timeout=10).json()
+                
+                if r.get("ok"):
+                    success_flag = True
+                    if is_signal:
+                        message_id = r["result"]["message_id"]
+                        with self.lock:
+                            self.sent_messages.append({
+                                'chat_id': chat_id,
+                                'message_id': message_id,
+                                'expiry': expiry_ts
+                            })
+                else:
+                    logger.error(f"❌ Telegram API Error: {r}")
+                    
             except Exception as e:
                 logger.error(f"❌ Failed to send to {chat_id}: {e}")
+        return success_flag
 
 # Global instance
 notifier = TelegramSignalNotifier()

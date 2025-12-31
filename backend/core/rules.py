@@ -15,7 +15,7 @@ class SystemMode(Enum):
 # --- RISK MANAGEMENT RULES ---
 class RiskRules:
     # Minimum confidence to even consider a trade
-    MIN_CONFIDENCE_LEVEL = 0.40  
+    MIN_CONFIDENCE_LEVEL = 0.20  
     
     # Strong confidence for aggressive entry
     HIGH_CONFIDENCE_LEVEL = 0.65 

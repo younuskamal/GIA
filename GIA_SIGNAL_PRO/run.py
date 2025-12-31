@@ -57,7 +57,8 @@ def main():
                     
                     if conf >= MIN_CONFIDENCE:
                         print(f"\n🚀 {Fore.GREEN}SIGNAL CONFIRMED: {direction} ({conf}%) at {ts}")
-                        sent = notifier.send_signal(direction, conf, ts)
+                        price_val = res.get('price', 0)
+                        sent = notifier.send_signal(direction, conf, ts, price_val)
                         if sent: print(f"   {Fore.BLUE}📨 Telegram: Dispatched.")
                         else: print(f"   {Fore.RED}⚠️ Telegram: Dispatch Failed.")
                 

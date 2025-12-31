@@ -118,8 +118,11 @@ class GIA_Apex_Distiller:
         df['session_london'] = ((df['hour'] >= 8) & (df['hour'] <= 16)).astype(int)
         df['session_ny'] = ((df['hour'] >= 13) & (df['hour'] <= 21)).astype(int)
         
+        # Market Regime Analysis
+        df = self.regime_engine.classify(df)
+        
         # ⚡ Micro-Scaling Features for High Frequency
-        df['rsi_7'] = self._rsi(df['close'], window=7)
+        df['rsi_7'] = calculate_rsi(df['close'], period=7)
         df['roc_3'] = df['close'].pct_change(3)
         
         self.features = [
@@ -134,47 +137,26 @@ class GIA_Apex_Distiller:
 
     def label_data(self, df):
         """
-        � HIGH-ALPHA SCALPING LABELING
-        Targeting 15-30 pip moves with tight risk control for human execution.
+        🛡 NUCLEAR HIGH-FREQUENCY SCALPING LABELING
+        Engineered for 10-30 trades per day (Maximum Intensity).
         """
-        print("🧠 Labeling signals for HYPER-SCALPING (Small Account Optimization)...")
-        horizon = 8 # Fast pivot detection
+        print("🧠 Labeling signals for NUCLEAR HIGH-FREQUENCY (Volume Priority)...")
+        horizon = 4 # Fast 4-minute pivots
         
-        # Hyper-sensitive threshold for micro-scalps
-        df['atr_val'] = calculate_atr(df, 14)
-        df['atr_thresh'] = (df['atr_val'] * 0.4).rolling(20).mean() # Low threshold = More opportunities
+        # Ultra-sensitive targets for micro-move capture
+        df['atr_val'] = calculate_atr(df, period=14)
+        df['atr_thresh'] = (df['atr_val'] * 0.12).rolling(5).mean() # High sensitivity
         
         future_max = df['high'].rolling(horizon).max().shift(-horizon)
         future_min = df['low'].rolling(horizon).min().shift(-horizon)
         
-        # Optimized for small account growth (High frequency, Moderate RR)
+        # Hyper-active logic with tight drawdown constraint
         buy_cond = (future_max - df['close'] > df['atr_thresh']) & (df['close'] - future_min < df['atr_thresh'] * 0.6)
         sell_cond = (df['close'] - future_min > df['atr_thresh']) & (future_max - df['close'] < df['atr_thresh'] * 0.6)
         
         df['target'] = 0 # WAIT
         df.loc[buy_cond, 'target'] = 1 # BUY
         df.loc[sell_cond, 'target'] = 2 # SELL
-        
-        # Teacher signals integration for consensus filtering
-        teacher_files = ['GIA_v14_PRO.pkl', 'GIA_v2_PRO.pkl', 'GIA_v2_FLASH.pkl']
-        probas = []
-        for f in teacher_files:
-            path = os.path.join(self.teachers_dir, f)
-            if os.path.exists(path):
-                try:
-                    m_data = joblib.load(path)
-                    t_feats = m_data.get('features', m_data.get('feature_columns', []))
-                    if all(c in df.columns for c in t_feats):
-                        p = m_data['model'].predict_proba(df[t_feats])
-                        probas.append(p)
-                        print(f"   📡 Teacher {f} consensus integrated.")
-                except: pass
-
-        if probas:
-            avg_p = np.mean(probas, axis=0)
-            # Refine: Only accept if teachers don't strongly disagree
-            df.loc[(df['target'] == 1) & (avg_p[:, 2] > 0.4), 'target'] = 0
-            df.loc[(df['target'] == 2) & (avg_p[:, 1] > 0.4), 'target'] = 0
         
         return df.dropna()
 
@@ -203,28 +185,44 @@ class GIA_Apex_Distiller:
         
         print(f"📊 Training: {len(X_train)} | Calib: {len(X_calib)} | Validation: {len(X_test)}")
         
-        weights = compute_sample_weight('balanced', y_train)
-        # Higher boost for frequency
-        weights[y_train != 0] *= 8.0 
+        # ⚖️ NUCLEAR BALANCING: 2.5 Signal : 1 Wait
+        skip_indices = train_df[train_df['target'] == 0].index
+        buy_indices = train_df[train_df['target'] == 1].index
+        sell_indices = train_df[train_df['target'] == 2].index
         
-        # Sniper Model: Hyper-Active High-Precision
+        signal_size = len(buy_indices) + len(sell_indices)
+        np.random.seed(42)
+        # Force Entry Bias: Signals are 2.5x more common than Wait
+        target_wait_size = int(signal_size / 2.5)
+        downsampled_skip = np.random.choice(skip_indices, size=min(len(skip_indices), target_wait_size), replace=False)
+        
+        balanced_idx = np.concatenate([downsampled_skip, buy_indices, sell_indices])
+        train_df = train_df.loc[balanced_idx].sample(frac=1.0) # Shuffle
+        
+        X_train, y_train = train_df[self.features], train_df['target']
+        X_test, y_test = test_df[self.features], test_df['target']
+        X_calib, y_calib = calib_df[self.features], calib_df['target']
+        
+        weights = compute_sample_weight('balanced', y_train)
+        
+        # Deep Refinement Configuration for Hyper-Scalping
         model = xgb.XGBClassifier(
-            max_depth=6, # Reduced depth to prevent explosion
-            learning_rate=0.02, 
-            n_estimators=1000,
+            max_depth=6,
+            learning_rate=0.015,
+            n_estimators=3000, # Deep learning capacity
             objective='multi:softprob',
             num_class=3,
             tree_method='hist',
             subsample=0.8,
             colsample_bytree=0.8,
-            gamma=1.5,
-            min_child_weight=2,
+            gamma=0.05, 
+            min_child_weight=1,
             random_state=42
         )
         
-        print("🛠️ Phase 1: Training Sniper Core...")
+        print("🛠️ Phase 1: Training Sniper Core (Deep Refinement)...")
         model.fit(X_train, y_train, sample_weight=weights, 
-                  eval_set=[(X_test, y_test)], early_stopping_rounds=50, verbose=100)
+                  eval_set=[(X_test, y_test)], early_stopping_rounds=100, verbose=100)
         
         # ⚖️ Monotonic Calibration Audit
         print("⚖️ Calibrating Monotonic Confidence Engine...")

@@ -18,7 +18,7 @@ class StrategyHandler:
         self.cooldown_counter = 0
         self.last_trade_date = None
         self.daily_trade_count = 0
-        self.MAX_TRADES_PER_DAY = 3 # GIA Spec Alignment
+        self.MAX_TRADES_PER_DAY = 30 # Nuclear Frequency Spec
 
     def apply_strategy(self, 
                        raw_signal: str, 
@@ -32,14 +32,10 @@ class StrategyHandler:
         reasons = []
         regime = context.get('regime_flag', 0)
 
-        # 1. Stress Test Mode: No Filters
-        if self.mode == SystemMode.STRESS_TEST_MODE:
-            return {
-                "signal": raw_signal,
-                "confidence": confidence,
-                "risk_level": "HIGH",
-                "explanation": "Raw model output (Stress Test)"
-            }
+        # 🔓 NUCLEAR AGGRESSION: All filters disabled for Maximum Frequency
+        if raw_signal != SignalType.WAIT.value:
+            self.daily_trade_count += 1
+            return self._finalize(raw_signal, confidence, "MEDIUM", ["Nuclear High-Frequency Entry"])
 
         # 2. Basic Confidence Check (v14 Spec: 0.40)
         base_thresh = 0.40 if self.is_legacy else RiskRules.MIN_CONFIDENCE_LEVEL
@@ -67,14 +63,13 @@ class StrategyHandler:
                  return self._finalize(SignalType.WAIT.value, confidence, "HIGH", reasons)
              risk_level = "HIGH"
 
-        # 4. Volatility Squeeze/Craziness Filter
-        bb_width = context.get('bb_width', 1.0)
-        if bb_width < 0.0010: # Slightly relaxed squeeze
+        # 4. Volatility Squeeze Filter (DISABLED for High-Freq)
+        if False: # bb_width < 0.0010: 
              reasons.append(f"Market Squeeze (BB Width {bb_width:.5f} < 0.0010)")
              return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
         
-        # 5. Realistic Spread/ATR Ratio (FOR V1.1 ONLY)
-        if not self.is_legacy:
+        # 5. Realistic Spread/ATR Ratio (DISABLED for High-Freq)
+        if False: # not self.is_legacy:
             atr = context.get('atr', 1.0)
             spread = context.get('spread', 0.5)
             spread_limit = 0.50
@@ -82,36 +77,8 @@ class StrategyHandler:
                  reasons.append(f"High Cost/Spread ({spread:.2f} > {atr*spread_limit:.2f})")
                  return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
 
-        # 6. Cooldown Logic
-        if self.mode == SystemMode.STRATEGY_TEST_MODE:
-            if self.cooldown_counter > 0:
-                self.cooldown_counter -= 1
-                reasons.append(f"Cooldown Active ({self.cooldown_counter} left)")
-                return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
-
-        # 7. Regime-Aware Rules (FOR V1.1 ONLY)
-        if not self.is_legacy:
-            regime = context.get('regime_flag', 0)
-            if regime == 2: # HIGH_VOL
-                threshold = 0.75
-            elif regime == 0: # RANGE
-                threshold = 0.58
-            else: # TREND
-                threshold = 0.48
-                
-            if confidence < threshold:
-                reasons.append(f"Regime {regime} threshold not met ({confidence:.2f} < {threshold})")
-                return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
-
-        # 7. Trend Alignment Filter (Only in TREND regime)
-        if regime == 1:
-            dist_200 = context.get('dist_ema200', 0)
-            if raw_signal == "BUY" and dist_200 < -0.008: # 0.8% buffer
-                 reasons.append("Trend Mismatch: BUY signal deep below EMA200")
-                 return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
-            if raw_signal == "SELL" and dist_200 > 0.008: # 0.8% buffer
-                 reasons.append("Trend Mismatch: SELL signal deep above EMA200")
-                 return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
+        # [Filters removed for Nuclear Mode]
+        return self._finalize(SignalType.WAIT.value, confidence, "LOW", ["Signal Filtered"])
 
         # If we passed filters, accept signal
         decision = raw_signal

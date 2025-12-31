@@ -94,8 +94,11 @@ class FeatureFactory:
             
             # Momentum
             if f == 'rsi': df['rsi'] = FeatureFactory._rsi(df['close'])
+            elif f == 'rsi_7': df['rsi_7'] = FeatureFactory._rsi(df['close'], period=7)
+            elif f == 'roc_3': df['roc_3'] = df['close'].pct_change(3)
             elif f == 'rsi_slope': df['rsi_slope'] = FeatureFactory._rsi(df['close']).diff(3)
             elif f == 'momentum': df['momentum'] = df['close'].diff(5) / (df['close'].shift(5) + 1e-9)
+            elif f == 'mom_5': df['mom_5'] = df['close'].pct_change(5)
             elif f == 'change': df['change'] = df['close'].pct_change()
             elif f.startswith('mom_'):
                 lookback = 5

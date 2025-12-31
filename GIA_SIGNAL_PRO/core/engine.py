@@ -93,7 +93,8 @@ class GIASignalEngine:
                 return {
                     "direction": direction,
                     "confidence": conf,
-                    "timestamp": ts
+                    "timestamp": ts,
+                    "price": latest['close'].iloc[0]
                 }
 
             return None

@@ -27,7 +27,7 @@ class BacktestEngine:
     def load_model(self):
         self.model_data = joblib.load(self.model_path)
 
-    def backtest(self, df, broker_name="VIPER", initial_balance=10000, risk_pct=1.0, 
+    def backtest(self, df, broker_name="FIPER", initial_balance=10000, risk_pct=1.0, 
                  mode=SystemMode.STRATEGY_TEST_MODE, sizing_mode='dynamic', fixed_lot_size=0.01,
                  external_signals=None):
         """
@@ -131,33 +131,46 @@ class BacktestEngine:
                 # Using 'Close' for estimation, but High/Low for stop checks
                 curr_price = closes[i]
                 
-                # Check for SL/TP hits (High/Low)
+                # --- B. Update MFE/MAE (Maximum Favorable/Adverse Excursion) ---
+                price_diff = closes[i] - position['entry_price']
+                if position['type'] == 'BUY':
+                    position['mfe'] = max(position.get('mfe', 0), highs[i] - position['entry_price'])
+                    position['mae'] = min(position.get('mae', 0), lows[i] - position['entry_price'])
+                else:
+                    position['mfe'] = max(position.get('mfe', 0), position['entry_price'] - lows[i])
+                    position['mae'] = min(position.get('mae', 0), position['entry_price'] - highs[i])
+                
+                # --- C. Check for SL/TP hits (Pessimistic Intra-bar Logic) ---
                 exit_price = None
                 exit_reason = None
-                
-                # Dynamic Spread for Exit
                 spread = broker.get_dynamic_spread() 
                 
                 if position['type'] == 'BUY':
-                    # Stop Loss Hit? (Low check)
-                    # Sell exit price = Bid ~ Low
-                    if lows[i] <= position['sl']:
-                        exit_price = position['sl'] # Assume filled at SL (slippage handled below?)
-                        exit_reason = 'SL'
-                    # Take Profit Hit?
-                    elif highs[i] >= position['tp']:
-                        exit_price = position['tp']
-                        exit_reason = 'TP'
-                    # Signal Close? (Reverse signal or Strategy logic? Assuming StrategyHandler manages this via applied rules)
-                    # For simplicity, StrategyHandler usually returns BUY/SELL. If opposite, close.
+                    # If both hit in same candle, assume SL (Pessimistic)
+                    hit_sl = lows[i] <= position['sl']
+                    hit_tp = highs[i] >= position['tp']
                     
-                elif position['type'] == 'SELL':
-                    # Stop Loss Hit? (High check + Spread)
-                    # Buy exit price = Ask ~ High + Spread
-                    if highs[i] + spread >= position['sl']:
+                    if hit_sl and hit_tp:
+                        exit_price = position['sl']
+                        exit_reason = 'SL (Intra-bar Collision)'
+                    elif hit_sl:
                         exit_price = position['sl']
                         exit_reason = 'SL'
-                    elif lows[i] + spread <= position['tp']:
+                    elif hit_tp:
+                        exit_price = position['tp']
+                        exit_reason = 'TP'
+                        
+                elif position['type'] == 'SELL':
+                    hit_sl = highs[i] + spread >= position['sl']
+                    hit_tp = lows[i] + spread <= position['tp']
+                    
+                    if hit_sl and hit_tp:
+                        exit_price = position['sl']
+                        exit_reason = 'SL (Intra-bar Collision)'
+                    elif hit_sl:
+                        exit_price = position['sl']
+                        exit_reason = 'SL'
+                    elif hit_tp:
                         exit_price = position['tp']
                         exit_reason = 'TP'
                 
@@ -190,17 +203,23 @@ class BacktestEngine:
                     
                     # Apply Swap? (Ignored for now)
                     
+                    pnl_pct = (pnl / balance) * 100 if balance != 0 else 0
                     balance += pnl
+                        
                     trades_log.append({
-                        'entry_date': position['entry_time'],
-                        'exit_date': current_date,
+                        'entry_date': str(position['entry_time']),
+                        'exit_date': str(current_date),
                         'type': position['type'],
                         'lots': position['lots'],
-                        'entry': position['entry_price'],
-                        'exit': real_exit_price,
-                        'pnl_net': pnl, # Comm deducted on entry
+                        'entry_price': position['entry_price'],
+                        'exit_price': real_exit_price,
+                        'pnl_net': pnl, 
+                        'pnl_pct': pnl_pct,
+                        'balance': balance,
+                        'mfe_pips': round(position.get('mfe', 0) * 10, 1),
+                        'mae_pips': round(position.get('mae', 0) * 10, 1),
                         'confidence': position.get('confidence', 0),
-                        'reason': exit_reason
+                        'exit_reason': exit_reason
                     })
                     
                     if pnl < 0:

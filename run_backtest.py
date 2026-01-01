@@ -137,6 +137,15 @@ class FeatureFactory:
                 ma = df['close'].rolling(20).mean()
                 std = df['close'].rolling(20).std()
                 df['bb_pos'] = (df['close'] - (ma - 2*std)) / (4*std + 1e-9)
+            elif f == 'bb_slope':
+                ma = df['close'].rolling(20).mean()
+                std = df['close'].rolling(20).std()
+                bw = (4 * std) / (ma + 1e-9)
+                df['bb_slope'] = bw.diff(3)
+            elif f == 'ema_cross':
+                ema9 = df['close'].ewm(span=9, adjust=False).mean()
+                ema21 = df['close'].ewm(span=21, adjust=False).mean()
+                df['ema_cross'] = (df['close'] - ema9) / (ema9 + 1e-9) - (df['close'] - ema21) / (ema21 + 1e-9)
             
             elif f == 'macd_norm':
                 e12 = df['close'].ewm(span=12, adjust=False).mean()
@@ -177,7 +186,7 @@ class FeatureFactory:
             elif f == 'vol_regime':
                 v20 = df['close'].rolling(20).std()
                 df['vol_regime'] = (v20 / (v20.rolling(200).mean() + 1e-6)).fillna(1.0)
-            elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour', 'session_london', 'session_ny']:
+            elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour', 'session_london', 'session_ny', 'is_high_liquidity']:
                 hour = df['date'].dt.hour
                 df['is_london'] = ((hour >= 8) & (hour <= 16)).astype(int)
                 df['is_ny'] = ((hour >= 13) & (hour <= 21)).astype(int)
@@ -185,6 +194,7 @@ class FeatureFactory:
                 df['session_ny'] = df['is_ny']
                 df['is_peak'] = ((hour >= 7) & (hour <= 21)).astype(int)
                 df['is_peak_hour'] = df['is_peak']
+                df['is_high_liquidity'] = ((hour >= 8) & (hour <= 11)) | ((hour >= 13) & (hour <= 16))
             elif f == 'velocity':
                 v20 = df['close'].rolling(20).std()
                 df['velocity'] = df['close'].diff(5) / (v20 + 1e-9)
@@ -371,79 +381,166 @@ class ExportManager:
         <head>
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>تقرير أداء GIA PRO - {model_name}</title>
+            <title>GIA AI | {model_name} Final Report</title>
             <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <style>
-                @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
-                body {{ font-family: 'Cairo', sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }}
-                .container {{ max-width: 1200px; margin: auto; background: #1e293b; padding: 30px; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }}
-                .header {{ border-bottom: 2px solid #334155; padding-bottom: 20px; margin-bottom: 30px; text-align: center; }}
-                .header h1 {{ margin: 0; color: #38bdf8; font-size: 2.5em; }}
-                .header p {{ color: #94a3b8; font-size: 1.1em; }}
-                .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 30px; }}
-                .stat-card {{ background: #0f172a; padding: 15px; border-radius: 8px; border: 1px solid #334155; text-align: center; transition: transform 0.2s; }}
-                .stat-card:hover {{ transform: translateY(-5px); border-color: #38bdf8; }}
-                .stat-card h3 {{ margin: 0; color: #94a3b8; font-size: 0.85em; text-transform: uppercase; }}
-                .stat-card p {{ margin: 8px 0 0; font-size: 1.5em; font-weight: bold; color: #38bdf8; }}
-                .chart-container {{ background: #0f172a; padding: 20px; border-radius: 8px; margin-bottom: 30px; border: 1px solid #334155; height: 450px; }}
-                .trades-section {{ background: #0f172a; padding: 20px; border-radius: 8px; border: 1px solid #334155; }}
-                .table-wrapper {{ overflow-x: auto; max-height: 500px; margin-top: 15px; }}
-                table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
-                th {{ padding: 12px; text-align: right; background: #1e293b; color: #38bdf8; position: sticky; top: 0; z-index: 10; border-bottom: 2px solid #334155; }}
-                td {{ padding: 10px; text-align: right; border-bottom: 1px solid #334155; color: #f8fafc; }}
-                .win {{ color: #22c55e !important; font-weight: bold; }}
-                .loss {{ color: #ef4444 !important; font-weight: bold; }}
-                .footer {{ text-align: center; margin-top: 40px; color: #64748b; font-size: 0.85em; }}
-                ::-webkit-scrollbar {{ width: 8px; }}
-                ::-webkit-scrollbar-track {{ background: #0f172a; }}
-                ::-webkit-scrollbar-thumb {{ background: #334155; border-radius: 4px; }}
-                ::-webkit-scrollbar-thumb:hover {{ background: #38bdf8; }}
+                @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@300;400;600;700&family=Outfit:wght@300;400;600&display=swap');
+                :root {{ 
+                    --p-color: #38bdf8; --p-glow: rgba(56, 189, 248, 0.4); 
+                    --success: #22c55e; --error: #ef4444; 
+                    --bg: #030712; --card: #111827; --card-alt: #1f2937;
+                    --text: #f9fafb; --text-dim: #9ca3af;
+                }}
+                
+                * {{ box-sizing: border-box; scrollbar-width: thin; scrollbar-color: var(--p-color) var(--bg); }}
+                body {{ font-family: 'Cairo', 'Outfit', sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 20px; overflow-x: hidden; }}
+                
+                .fade-in {{ animation: fadeIn 0.8s ease-out; }}
+                @keyframes fadeIn {{ from {{ opacity: 0; transform: translateY(10px); }} to {{ opacity: 1; transform: translateY(0); }} }}
+
+                .container {{ max-width: 1300px; margin: auto; }}
+
+                /* 🛰️ Premium Header */
+                header {{ 
+                    background: radial-gradient(circle at top right, rgba(56, 189, 248, 0.1), transparent), var(--card);
+                    border: 1px solid rgba(255,255,255,0.05); padding: 40px; border-radius: 24px; margin-bottom: 24px;
+                    display: flex; justify-content: space-between; align-items: center; position: relative;
+                }}
+                .header-main h1 {{ margin: 0; font-size: 2.8em; font-weight: 700; color: var(--p-color); text-shadow: 0 0 20px var(--p-glow); }}
+                .header-main p {{ margin: 5px 0 0; color: var(--text-dim); font-size: 1.1em; }}
+                
+                .badge {{ background: rgba(34, 197, 94, 0.1); color: var(--success); padding: 6px 12px; border-radius: 8px; font-size: 0.8em; font-weight: bold; border: 1px solid var(--success); text-transform: uppercase; }}
+                .badge.elite {{ background: rgba(56, 189, 248, 0.1); color: var(--p-color); border-color: var(--p-color); }}
+                
+                .header-meta {{ display: flex; gap: 30px; border-right: 1px solid rgba(255,255,255,0.1); padding-right: 30px; }}
+                .meta-item {{ text-align: left; }}
+                .meta-item label {{ display: block; font-size: 0.8em; color: var(--text-dim); }}
+                .meta-item value {{ font-size: 1.5em; font-weight: 600; display: block; }}
+
+                /* 🏁 Stats Grid */
+                .stats-container {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }}
+                .stat-tile {{ 
+                    background: var(--card); padding: 24px; border-radius: 16px; border: 1px solid rgba(255,255,255,0.05);
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); cursor: default;
+                }}
+                .stat-tile:hover {{ border-color: var(--p-color); background: var(--card-alt); transform: scale(1.02); }}
+                .stat-tile label {{ font-size: 0.85em; color: var(--text-dim); display: flex; align-items: center; gap: 8px; }}
+                .stat-tile h2 {{ margin: 8px 0 0; font-size: 2em; letter-spacing: -0.5px; }}
+
+                /* 📈 Main Content Layout */
+                .layout-grid {{ display: grid; grid-template-columns: 2fr 1fr; gap: 24px; margin-bottom: 24px; }}
+                .box {{ background: var(--card); padding: 30px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.05); }}
+                .box h3 {{ margin: 0 0 25px; font-size: 1.25em; display: flex; align-items: center; gap: 10px; color: var(--text-dim); }}
+                
+                /* 📋 Custom Table */
+                .table-controls {{ margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }}
+                .search-input {{ background: var(--card-alt); border: 1px solid rgba(255,255,255,0.1); padding: 10px 15px; border-radius: 10px; color: white; width: 250px; outline: none; }}
+                .search-input:focus {{ border-color: var(--p-color); }}
+
+                .table-container {{ max-height: 500px; overflow-y: auto; overflow-x: auto; }}
+                table {{ width: 100%; border-collapse: collapse; text-align: right; }}
+                th {{ position: sticky; top: 0; background: var(--card-alt); z-index: 10; padding: 15px; font-size: 0.85em; text-transform: uppercase; color: var(--p-color); border-bottom: 1px solid rgba(255,255,255,0.1); }}
+                td {{ padding: 12px 15px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.95em; }}
+                tr:hover {{ background: rgba(56, 189, 248, 0.05); }}
+
+                .win {{ color: var(--success); font-weight: 600; }}
+                .loss {{ color: var(--error); font-weight: 600; }}
+                .type-buy {{ color: var(--success); background: rgba(34, 197, 94, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(34, 197, 94, 0.3); }}
+                .type-sell {{ color: var(--error); background: rgba(239, 68, 68, 0.1); padding: 2px 8px; border-radius: 4px; border: 1px solid rgba(239, 68, 68, 0.3); }}
+
+                /* 📊 Micro-Analytics */
+                .micro-stats {{ display: grid; gap: 15px; }}
+                .micro-item {{ display: flex; justify-content: space-between; padding: 12px; background: rgba(255,255,255,0.02); border-radius: 10px; }}
+                .micro-item span {{ font-size: 0.9em; opacity: 0.7; }}
+                .micro-item strong {{ font-family: 'Outfit'; }}
+
+                footer {{ text-align: center; padding: 40px; border-top: 1px solid rgba(255,255,255,0.05); margin-top: 40px; opacity: 0.5; font-size: 0.85em; }}
+
+                @media (max-width: 1024px) {{ .layout-grid {{ grid-template-columns: 1fr; }} .stats-container {{ grid-template-columns: repeat(2, 1fr); }} }}
             </style>
         </head>
         <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🦁 ذكاء الأداء - نظام GIA PRO</h1>
-                    <p>الموديل: {model_name} | الوسيط: {params['broker']} | الإطار الزمني: {params['tf']}</p>
-                </div>
-                
-                <div class="stats-grid">
-                    <div class="stat-card"><h3>صافي الربح</h3><p class="{ 'win' if res['net_profit'] >=0 else 'loss' }">${res['net_profit']:.2f}</p></div>
-                    <div class="stat-card"><h3>عائد الإستثمار</h3><p class="{ 'win' if res['net_profit_pct'] >=0 else 'loss' }">{res['net_profit_pct']:.2f}%</p></div>
-                    <div class="stat-card"><h3>عامل الربح</h3><p>{res['profit_factor']:.2f}</p></div>
-                    <div class="stat-card"><h3>نسبة النجاح</h3><p>{res['win_rate']:.1f}%</p></div>
-                    <div class="stat-card"><h3>أقصى تراجع</h3><p class="loss">{res['max_drawdown']:.2f}%</p></div>
-                    <div class="stat-card"><h3>معدل البقاء</h3><p class="win">{survival:.1f}%</p></div>
-                    <div class="stat-card"><h3>نسبة شارب</h3><p>{res.get('sharpe', 0):.2f}</p></div>
-                    <div class="stat-card"><h3>الصفقات/يوم</h3><p>{res.get('avg_trades_day', 0):.1f}</p></div>
-                </div>
-
-                <div class="chart-container">
-                    <canvas id="equityChart"></canvas>
-                </div>
-
-                <div class="header" style="margin-top: 40px;"><h2>📊 تحليل الموسمية (الأداء حسب التوقيت)</h2></div>
-                <div class="stats-grid">
-                    <div class="chart-container" style="height: 300px;">
-                        <canvas id="hourlyChart"></canvas>
+            <div class="container fade-in">
+                <!-- 🚀 Institutional Header -->
+                <header>
+                    <div class="header-main">
+                        <div style="display: flex; align-items: center; gap: 15px;">
+                            <h1>GIA AI PRO</h1>
+                            <div class="badge { 'elite' if res['net_profit_pct'] > 50 else '' }">{ 'ELITE PERFORMANCE' if res['net_profit_pct'] > 50 else 'STABLE GROWTH' }</div>
+                        </div>
+                        <p>تقرير التحليل الفني لنموذج: <strong>{model_name}</strong> – {params['broker']}</p>
                     </div>
-                    <div class="chart-container" style="height: 300px;">
-                        <canvas id="dailyChart"></canvas>
+                    <div class="header-meta">
+                        <div class="meta-item"><label>البداية</label><value>${res['equity_curve'][0]:,.0f}</value></div>
+                        <div class="meta-item"><label>القمة القصوى</label><value style="color: var(--p-color)">${max(res['equity_curve']):,.0f}</value></div>
+                        <div class="meta-item"><label>الرصيد الحالي</label><value style="color: var(--success)">${res['equity_curve'][-1]:,.0f}</value></div>
+                    </div>
+                </header>
+
+                <!-- 📊 Core Vitals -->
+                <div class="stats-container">
+                    <div class="stat-tile">
+                        <label>📈 صافي الأرباح</label>
+                        <h2 class="{ 'win' if res['net_profit'] > 0 else 'loss' }">${res['net_profit']:,.2f}</h2>
+                        <div style="font-size: 0.85em; margin-top: 8px; opacity: 0.8;">عائد إجمالي: {res['net_profit_pct']:.2f}%</div>
+                    </div>
+                    <div class="stat-tile">
+                        <label>🎯 معدل النجاح</label>
+                        <h2>{res['win_rate']:.1f}%</h2>
+                        <div style="font-size: 0.85em; margin-top: 8px; opacity: 0.8;">{res['win_count']} فوز / {res['loss_count']} خسارة</div>
+                    </div>
+                    <div class="stat-tile">
+                        <label>🛡️ أقصى تراجع</label>
+                        <h2 class="loss">{res['max_drawdown']:.2f}%</h2>
+                        <div style="font-size: 0.85em; margin-top: 8px; opacity: 0.8;">عامل شارب: {res.get('sharpe', 0):.2f}</div>
+                    </div>
+                    <div class="stat-tile">
+                        <label>🧪 درجة الموثوقية</label>
+                        <h2>{survival:.1f}%</h2>
+                        <div style="font-size: 0.85em; margin-top: 8px; opacity: 0.8;">اختبار Monte Carlo</div>
                     </div>
                 </div>
 
-                <div class="trades-section">
-                    <h2 style="margin: 0; color: #38bdf8; font-size: 1.5em;">📜 سجل الصفقات التفصيلي</h2>
-                    <div class="table-wrapper">
+                <!-- 📊 Charts Layout -->
+                <div class="layout-grid">
+                    <div class="box">
+                        <h3>📈 نمو المحفظة الزمني (HFT Logic)</h3>
+                        <div style="height: 400px;"><canvas id="equityChart"></canvas></div>
+                    </div>
+                    <div class="box micro-analytics">
+                        <h3>🧠 تحليل السلوك</h3>
+                        <div class="micro-stats">
+                            <div class="micro-item"><span>أكبر صفقة رابحة</span><strong class="win">${res['max_win']:,.2f}</strong></div>
+                            <div class="micro-item"><span>أكبر صفقة خاسرة</span><strong class="loss">${res['max_loss']:,.2f}</strong></div>
+                            <div class="micro-item"><span>أطول سلسلة فوز</span><strong class="win">{res.get('max_consecutive_wins', 0)} صفقات</strong></div>
+                            <div class="micro-item"><span>أطول سلسلة خسارة</span><strong class="loss">{res.get('max_consecutive_losses', 0)} صفقات</strong></div>
+                            <div class="micro-item"><span>متوسط الربح/الخسارة</span><strong>{res.get('avg_win_loss_ratio', 0):.2f}</strong></div>
+                            <div class="micro-item"><span>عامل الربح (PF)</span><strong style="color: var(--p-color)">{res['profit_factor']:.2f}</strong></div>
+                            <div class="micro-item"><span>كثافة الإشارات</span><strong>{res.get('avg_trades_day', 0):.1f} صفقة/يوم</strong></div>
+                        </div>
+                        <div style="height: 120px; margin-top: 25px;"><canvas id="dailyChart"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- 📜 Detailed Execution Log -->
+                <div class="box fade-in" style="animation-delay: 0.2s;">
+                    <div class="table-controls">
+                        <h3>📜 سجل التنفيذ المؤسساتي (M1 Precision)</h3>
+                        <input type="text" id="tradeSearch" class="search-input" placeholder="بحث عن صفقات..." onkeyup="filterTrades()">
+                    </div>
+                    <div class="table-container">
                         <table id="tradesTable">
                             <thead>
                                 <tr>
                                     <th>تاريخ الدخول</th>
                                     <th>النوع</th>
-                                    <th>سعر الدخول</th>
-                                    <th>الربح/الخسارة ($)</th>
-                                    <th>النسبة (%)</th>
-                                    <th>سبب الخروج</th>
+                                    <th>اللوت</th>
+                                    <th>السعر</th>
+                                    <th>النتيجة ($)</th>
+                                    <th>النسبة %</th>
+                                    <th>الرصيد</th>
+                                    <th>MFE/MAE</th>
+                                    <th>السبب</th>
                                 </tr>
                             </thead>
                             <tbody></tbody>
@@ -451,114 +548,99 @@ class ExportManager:
                     </div>
                 </div>
 
-                <div class="footer">
-                    GIA TRADING SYSTEMS - INTEGRATED ANALYTICAL SUITE v2.4 <br>
-                    تم إنشاء هذا التقرير تلقائياً بتاريخ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-                </div>
+                <footer>
+                    <strong>GIA TRADING ENGINE v3.0 | Institutional Analytical Suite</strong><br>
+                    Generated automatically on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Confidential
+                </footer>
             </div>
 
             <script>
-                // 🕒 Hourly Performance Chart
-                const hourlyCtx = document.getElementById('hourlyChart').getContext('2d');
-                const hourlyData = {json.dumps(res.get('hourly_pnl', [0]*24))};
-                new Chart(hourlyCtx, {{
-                    type: 'bar',
-                    data: {{
-                        labels: Array.from({{length: 24}}, (_, i) => i + ':00'),
-                        datasets: [{{
-                            label: 'الربح ($)',
-                            data: hourlyData,
-                            backgroundColor: hourlyData.map(v => v >= 0 ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.6)'),
-                            borderRadius: 4
-                        }}]
-                    }},
-                    options: {{
-                        responsive: true, maintainAspectRatio: false,
-                        plugins: {{ legend: {{ display: false }} }},
-                        scales: {{ y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }}
-                    }}
-                }});
+                // --- 📊 Charts Init ---
+                const chartDefaults = {{ 
+                    color: '#9ca3af', 
+                    font: {{ family: 'Outfit', size: 11 }},
+                    grid: {{ color: 'rgba(255,255,255,0.05)' }} 
+                }};
 
-                // 📅 Daily Performance Chart
-                const dailyCtx = document.getElementById('dailyChart').getContext('2d');
-                const days = ['الاثن', 'الثلاث', 'الأربع', 'الخميس', 'الجمعة', 'السبت', 'الأحد'];
-                const dailyData = {json.dumps(res.get('daily_pnl', [0]*7))};
-                new Chart(dailyCtx, {{
-                    type: 'bar',
-                    data: {{
-                        labels: days,
-                        datasets: [{{
-                            label: 'الربح ($)',
-                            data: dailyData,
-                            backgroundColor: dailyData.map(v => v >= 0 ? 'rgba(34, 197, 94, 0.6)' : 'rgba(239, 68, 68, 0.6)'),
-                            borderRadius: 4
-                        }}]
-                    }},
-                    options: {{
-                        responsive: true, maintainAspectRatio: false,
-                        plugins: {{ legend: {{ display: false }} }},
-                        scales: {{ y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }}
-                    }}
-                }});
-
-                // 📈 Equity Curve
-                const ctx = document.getElementById('equityChart').getContext('2d');
+                // 📈 Equity Chart
+                const equityCtx = document.getElementById('equityChart').getContext('2d');
                 const equityData = {equity_data};
-                new Chart(ctx, {{
+                new Chart(equityCtx, {{
                     type: 'line',
                     data: {{
                         labels: Array.from({{length: equityData.length}}, (_, i) => i),
                         datasets: [{{
-                            label: 'Equity Growth',
-                            data: equityData,
-                            borderColor: '#38bdf8',
-                            backgroundColor: 'rgba(56, 189, 248, 0.1)',
-                            fill: true,
-                            tension: 0.1,
-                            pointRadius: 0,
-                            borderWidth: 2
+                            label: 'Equity Growth', data: equityData,
+                            borderColor: '#38bdf8', borderWidth: 3, pointRadius: 0,
+                            fill: true, backgroundColor: 'rgba(56, 189, 248, 0.05)',
+                            tension: 0.2
                         }}]
                     }},
                     options: {{
                         responsive: true, maintainAspectRatio: false,
-                        plugins: {{ legend: {{ display: false }} }},
-                        scales: {{ x: {{ display: false }}, y: {{ grid: {{ color: '#334155' }}, ticks: {{ color: '#94a3b8' }} }} }}
+                        plugins: {{ legend: {{ display: false }}, tooltip: {{ mode: 'index', intersect: false }} }},
+                        scales: {{ x: {{ display: false }}, y: chartDefaults }}
                     }}
                 }});
 
-                // 📋 Table Populator
-                try {{
-                    const trades = {trades_json};
-                    const tbody = document.querySelector('#tradesTable tbody');
-                    if (trades && trades.length > 0) {{
-                        trades.forEach(t => {{
-                            const row = document.createElement('tr');
-                            const pnl = parseFloat(t.pnl_net || t.pnl || 0);
-                            const pnlClass = pnl >= 0 ? 'win' : 'loss';
-                            
-                            const date = t.entry_date || t.date || t.time || 'N/A';
-                            const type = t.type || 'N/A';
-                            const price = parseFloat(t.entry_price || t.price || 0).toFixed(2);
-                            const pnlStr = pnl.toFixed(2);
-                            const pctStr = (t.pnl_pct || 0).toFixed(2);
-                            const reason = t.exit_reason || 'Manual';
-
-                            row.innerHTML = `
-                                <td>${{date}}</td>
-                                <td>${{type}}</td>
-                                <td>${{price}}</td>
-                                <td class="${{pnlClass}}">${{pnlStr}}</td>
-                                <td class="${{pnlClass}}">${{pctStr}}%</td>
-                                <td>${{reason}}</td>
-                            `;
-                            tbody.appendChild(row);
-                        }});
-                    }} else {{
-                        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding: 20px;">لا توجد صفقات مسجلة</td></tr>';
+                // 📅 Daily Chart (Small)
+                const dailyCtx = document.getElementById('dailyChart').getContext('2d');
+                const dailyData = {json.dumps(res.get('daily_pnl', [0]*7))};
+                new Chart(dailyCtx, {{
+                    type: 'bar',
+                    data: {{
+                        labels: ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'],
+                        datasets: [{{ label: 'Profit', data: dailyData, backgroundColor: dailyData.map(v => v >= 0 ? '#22c55e' : '#ef4444'), borderRadius: 4 }}]
+                    }},
+                    options: {{
+                        responsive: true, maintainAspectRatio: false,
+                        plugins: {{ legend: {{ display: false }} }},
+                        scales: {{ 
+                            y: {{ display: false }},
+                            x: {{ ticks: chartDefaults.ticks, grid: {{ display: false }} }}
+                        }}
                     }}
-                }} catch (e) {{
-                    console.error("Error populating trades:", e);
+                }});
+
+                // --- 📋 Table Logical ---
+                const trades = {trades_json};
+                const tbody = document.querySelector('#tradesTable tbody');
+                
+                function renderTable(data) {{
+                    tbody.innerHTML = '';
+                    data.forEach(t => {{
+                        const row = document.createElement('tr');
+                        const pnl = parseFloat(t.pnl_net || 0);
+                        const isWin = pnl >= 0;
+                        
+                        row.innerHTML = `
+                            <td style="font-size: 0.85em; opacity: 0.8">${{t.entry_date}}</td>
+                            <td><span class="${{t.type == 'BUY' ? 'type-buy' : 'type-sell'}}">${{t.type}}</span></td>
+                            <td style="font-family: 'Outfit'">${{parseFloat(t.lots).toFixed(2)}}</td>
+                            <td style="font-family: 'Outfit'">${{parseFloat(t.entry_price).toFixed(2)}}</td>
+                            <td class="${{isWin ? 'win' : 'loss'}}">${{isWin ? '+' : ''}}${{pnl.toLocaleString()}}</td>
+                            <td class="${{isWin ? 'win' : 'loss'}}">${{parseFloat(t.pnl_pct).toFixed(2)}}%</td>
+                            <td style="font-family: 'Outfit'; font-weight: 600">$${{parseFloat(t.balance).toLocaleString()}}</td>
+                            <td style="font-size: 0.8em; color: var(--text-dim)">
+                                <span class="win">${{t.mfe_pips}}</span> / <span class="loss">${{t.mae_pips}}</span>
+                            </td>
+                            <td style="font-size: 0.8em; opacity: 0.7">${{t.exit_reason || 'Signal'}}</td>
+                        `;
+                        tbody.appendChild(row);
+                    }});
                 }}
+
+                function filterTrades() {{
+                    const query = document.getElementById('tradeSearch').value.toLowerCase();
+                    const filtered = trades.filter(t => 
+                        t.entry_date.toLowerCase().includes(query) || 
+                        t.type.toLowerCase().includes(query) ||
+                        (t.exit_reason || '').toLowerCase().includes(query)
+                    );
+                    renderTable(filtered);
+                }}
+
+                renderTable(trades);
             </script>
         </body>
         </html>
@@ -702,11 +784,16 @@ class ExportManager:
 
 # --- Battle Ground Engine ---
 class BattleArena:
-    def __init__(self):
-        self.data_dir = os.path.join(os.getcwd(), 'backend', 'hestory')
+    DEFAULT_DATA_DIR = r"C:\GIA_DATA"
+
+    def __init__(self, data_dir=None):
+        self.data_dir = data_dir if data_dir else self.DEFAULT_DATA_DIR
         self.models_dir = os.path.join(os.getcwd(), 'backend', 'models')
         self.pro_models_dir = os.path.join(os.getcwd(), 'GIA_SIGNAL_PRO', 'models')
         self.cache = {}
+        
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir, exist_ok=True)
 
     def _calculate_extended_stats(self, res):
         trades = pd.DataFrame(res['trades'])
@@ -741,8 +828,12 @@ class BattleArena:
         # Streak analysis
         trades['is_win'] = trades['pnl_net'] > 0
         streaks = trades['is_win'].ne(trades['is_win'].shift()).cumsum()
+        
         loss_streaks = trades[~trades['is_win']].groupby(streaks).size()
-        res['max_consecutive_losses'] = loss_streaks.max() if not loss_streaks.empty else 0
+        res['max_consecutive_losses'] = int(loss_streaks.max() if not loss_streaks.empty else 0)
+        
+        win_streaks = trades[trades['is_win']].groupby(streaks).size()
+        res['max_consecutive_wins'] = int(win_streaks.max() if not win_streaks.empty else 0)
         
         # 🕒 Seasonality Calculation
         trades['hour'] = trades['entry_date'].dt.hour
@@ -759,13 +850,16 @@ class BattleArena:
     def start(self, cli_args=None):
         print_banner()
         
-        if cli_args:
+        if cli_args and (cli_args.model or cli_args.compare):
             if cli_args.compare:
                 targets = sorted([m for m in os.listdir(self.models_dir) if m.endswith('.pkl')])
                 if os.path.exists(self.pro_models_dir):
                     targets += sorted([m for m in os.listdir(self.pro_models_dir) if m.endswith('.pkl')])
             else:
-                targets = [cli_args.model] if cli_args.model else []
+                m_name = cli_args.model
+                if m_name and not m_name.endswith('.pkl'):
+                    m_name += '.pkl'
+                targets = [m_name] if m_name else []
             
             tf = getattr(cli_args, 'tf', "M15")
             broker = cli_args.broker
@@ -798,9 +892,11 @@ class BattleArena:
             tf_choice = input(f"\n {Fore.WHITE}Enter Selection [Default M15] > {Style.RESET_ALL}").strip() or "1"
             tf = {"0":"M1", "1":"M15", "2":"M30", "3":"H1"}.get(tf_choice, "M15")
 
-            print(f"\n {Fore.YELLOW}STEP 3: BROKER PHYSICS{Style.RESET_ALL}")
+            print(f"\n {Fore.YELLOW}STEP 3: cTRADER INSTITUTIONAL PHYSICS{Style.RESET_ALL}")
             brokers = list(BrokerSimulator.PROFILES.keys())
-            for i, b in enumerate(brokers): print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {b:12}", end=" " if (i+1)%3 != 0 else "\n")
+            for i, b in enumerate(brokers): 
+                p = BrokerSimulator.PROFILES[b]
+                print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {p.name:20}", end=" " if (i+1)%2 != 0 else "\n")
             b_choice = input(f"\n\n {Fore.WHITE}Select Broker [Enter for FIPER] > {Style.RESET_ALL}").strip()
             broker = brokers[int(b_choice)-1] if b_choice.isdigit() else "FIPER"
             
@@ -830,17 +926,28 @@ class BattleArena:
                 needs_mtf = any(('_h1' in f or '_m15' in f or '_m5' in f or '_m30' in f) for f in req_feats)
                 
                 df = self._load_data(current_tf, needs_mtf)
-                df = df[(df['date'].dt.year >= start_y) & (df['date'].dt.year <= end_y)].copy()
-                if df.empty: continue
+                print(f"   📊 Loaded: {len(df)} candles for {current_tf}")
                 
+                df = df[(df['date'].dt.year >= start_y) & (df['date'].dt.year <= end_y)].copy()
+                if df.empty:
+                    print(f"   {Fore.YELLOW}⚠️ No data found for specified years {start_y}-{end_y}. (Year range in file: {df['date'].min() if not df.empty else 'N/A'}){Style.RESET_ALL}")
+                    continue
+                
+                print(f"   🔍 Constructing Features for {m_name}...")
                 df_proc = FeatureFactory.construct(df, req_feats)
                 df_proc = df_proc.dropna(subset=[f for f in req_feats if f in df_proc.columns])
+                
+                if df_proc.empty:
+                    print(f"   {Fore.RED}❌ ERROR: Processed data is empty. Check if all required features {req_feats[:5]}... exist.{Style.RESET_ALL}")
+                    continue
                 
                 engine = BacktestEngine(model_path=path, is_legacy="v14" in m_name)
                 engine.load_model()
                 
                 res = engine.backtest(df_proc, broker_name=broker, initial_balance=capital, risk_pct=risk, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot)
-                if "error" in res: continue
+                if "error" in res:
+                    print(f"   {Fore.RED}❌ Simulation Error: {res['error']}{Style.RESET_ALL}")
+                    continue
 
                 res = self._calculate_extended_stats(res)
                 
@@ -881,9 +988,10 @@ class BattleArena:
         if key in self.cache: return self.cache[key]
         
         df_p = self._read_csv(f'XAUUSD_{primary_tf}.csv')
+        
         if needs_multi:
-            # Enhanced Context Mapping: Ensure all common training contexts are available
-            contexts = [('m1', 'XAUUSD_M1.csv'), ('m5', 'XAUUSD_M1.csv'), ('m15', 'XAUUSD_M15.csv'), ('m30', 'XAUUSD_M30.csv'), ('h1', 'XAUUSD_H1.csv')]
+            # Enhanced Context Mapping: Strictly use M1 for M5 synthesis
+            contexts = [('m5', 'XAUUSD_M1.csv'), ('m15', 'XAUUSD_M15.csv'), ('m30', 'XAUUSD_M30.csv'), ('h1', 'XAUUSD_H1.csv')]
             merged = df_p.sort_values('date')
             for suffix, filename in contexts:
                 try:
@@ -900,9 +1008,14 @@ class BattleArena:
                 except Exception as e:
                     print(f"   {Fore.RED}⚠️ Error merging context {suffix}: {e}{Style.RESET_ALL}")
             
-            self.cache[key] = merged.dropna()
+            # Quality Guard: Fill minor gaps to prevent total data loss
+            res_df = merged.ffill().bfill()
+            if len(res_df) < len(df_p) * 0.5:
+                print(f"   {Fore.RED}⚠️ Severe data loss during merge! Original: {len(df_p)}, Merged: {len(res_df)}{Style.RESET_ALL}")
+            self.cache[key] = res_df
         else:
             self.cache[key] = df_p
+            
         return self.cache[key]
 
     def _read_csv(self, name):

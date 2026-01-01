@@ -17,18 +17,18 @@ class BrokerProfile:
 
 class BrokerSimulator:
     PROFILES = {
-        "VIPER": BrokerProfile("VIPER", 0.30, 0.45, 7.0),
-        "FIPER": BrokerProfile("FIPER", 0.20, 0.35, 6.0), # Aggressive low-cost
-        "ICMARKETS": BrokerProfile("IC MARKETS", 0.25, 0.40, 6.0),
-        "PEPPERSTONE": BrokerProfile("PEPPERSTONE", 0.35, 0.50, 7.0),
-        "BLACKBULL": BrokerProfile("BLACKBULL", 0.40, 0.60, 6.0),
-        "STRESS_TEST": BrokerProfile("STRESS TEST", 0.60, 1.00, 10.0),
-        "SURVIVAL": BrokerProfile("SURVIVAL", 1.20, 1.80, 7.0), # 1.2-1.8 pip spread, $7 commission
-        "ZERO": BrokerProfile("ZERO", 0.0, 0.0, 0.0) # For raw tests
+        "FIPER": BrokerProfile("FIPER cTrader", 0.10, 0.25, 5.0, slippage_probability=0.05, slippage_max=0.02),
+        "ICMARKETS": BrokerProfile("IC MARKETS (Raw)", 0.05, 0.20, 7.0, slippage_probability=0.10, slippage_max=0.03),
+        "PEPPERSTONE": BrokerProfile("PEPPERSTONE (Razor)", 0.05, 0.25, 7.0, slippage_probability=0.10, slippage_max=0.03),
+        "TOPSTEP": BrokerProfile("TOPSTEP (Prop)", 0.30, 0.60, 6.0, slippage_probability=0.20, slippage_max=0.10),
+        "VANTAGE": BrokerProfile("VANTAGE (Inst)", 0.15, 0.35, 6.0, slippage_probability=0.08, slippage_max=0.04),
+        "TICKMILL": BrokerProfile("TICKMILL (Raw)", 0.10, 0.30, 4.0, slippage_probability=0.12, slippage_max=0.05),
+        "XM": BrokerProfile("XM (Ultra-Low)", 0.60, 1.20, 0.0, slippage_probability=0.15, slippage_max=0.08),
+        "DOOMSDAY": BrokerProfile("THE DOOMSDAY MACHINE", 2.50, 5.00, 15.0, slippage_probability=0.80, slippage_max=0.50)
     }
 
-    def __init__(self, profile_name="VIPER"):
-        self.profile = self.PROFILES.get(profile_name.upper(), self.PROFILES["VIPER"])
+    def __init__(self, profile_name="FIPER"):
+        self.profile = self.PROFILES.get(profile_name.upper(), self.PROFILES["FIPER"])
 
     def get_dynamic_spread(self):
         """Returns a randomized spread value within the broker's range."""

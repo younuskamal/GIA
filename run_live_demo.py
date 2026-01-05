@@ -33,10 +33,17 @@ from backend.core.rules import RiskRules
 
 # 🦁 INSTITUTIONAL LOCK: Production Parameters
 # 🦁 Cross-Platform Path Mapping
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_DATA = os.path.join(BASE_DIR, 'data')
+
 if os.name == 'nt': # Windows
     DATA_FOLDER = r"C:\GIA_DATA"
 else: # Linux/Ubuntu (DigitalOcean)
     DATA_FOLDER = "/var/gia_data"
+
+# Fallback to local 'data' folder if global ones don't exist (Portable Mode)
+if not os.path.exists(DATA_FOLDER):
+    DATA_FOLDER = LOCAL_DATA
 
 if not os.path.exists(DATA_FOLDER):
     os.makedirs(DATA_FOLDER, exist_ok=True)

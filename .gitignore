@@ -40,13 +40,9 @@ backend/results/**
 results/**
 backend/data/cache/**
 backend/data/history/**
-data/**
-GIA_DATA/**
-C:/GIA_DATA/**
-*.log
-*.csv
-*.xlsx
-*.json
+# data/**  <-- Allowed for server parity
+# *.csv    <-- Allowed for server parity
+!data/*.csv
 !requirements.txt
 !package.json
 !composer.json

@@ -1,0 +1,219 @@
+{
+  "active_model_v": 14,
+  "history": [
+    {
+      "version": 1,
+      "filename": "model_v1.pkl",
+      "timestamp": "2025-12-30T00:40:00",
+      "metrics": {
+        "accuracy": 41.2,
+        "max_drawdown": 12.5,
+        "win_rate": 41.2,
+        "buy_win_rate": 45.0,
+        "sell_win_rate": 38.0
+      },
+      "status": "APPROVED",
+      "reason": "Initial professional model baseline."
+    },
+    {
+      "version": 2,
+      "filename": "model_v2.pkl",
+      "timestamp": "2025-12-30T01:06:30.656959",
+      "metrics": {
+        "accuracy": 29.693212525830553,
+        "max_drawdown": 0.0,
+        "win_rate": 29.693212525830553,
+        "buy_win_rate": 0,
+        "sell_win_rate": 0,
+        "train_acc_gap": 0.09331874068912954
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 41.20->29.69, DD: 12.50->0.00"
+    },
+    {
+      "version": 3,
+      "filename": "model_v3.pkl",
+      "timestamp": "2025-12-30T01:07:04.510536",
+      "metrics": {
+        "accuracy": 29.693212525830553,
+        "max_drawdown": 0.0,
+        "win_rate": 29.693212525830553,
+        "buy_win_rate": 0,
+        "sell_win_rate": 0,
+        "train_acc_gap": 0.07945107727012013
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 41.20->29.69, DD: 12.50->0.00"
+    },
+    {
+      "version": 4,
+      "filename": "model_v4.pkl",
+      "timestamp": "2025-12-30T01:09:57.553320",
+      "metrics": {
+        "accuracy": 29.70564836913286,
+        "max_drawdown": 0.0,
+        "win_rate": 29.70564836913286,
+        "buy_win_rate": 0,
+        "sell_win_rate": 0,
+        "final_balance": 1000.0,
+        "margin_called": false,
+        "train_acc_gap": 0.11779598033583744
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 41.20->29.71, DD: 12.50->0.00"
+    },
+    {
+      "version": 5,
+      "filename": "model_v5.pkl",
+      "timestamp": "2025-12-30T01:10:17.663174",
+      "metrics": {
+        "accuracy": 29.70564836913286,
+        "max_drawdown": 0.0,
+        "win_rate": 29.70564836913286,
+        "buy_win_rate": 0,
+        "sell_win_rate": 0,
+        "final_balance": 1000.0,
+        "margin_called": false,
+        "train_acc_gap": 0.11779598033583744
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 41.20->29.71, DD: 12.50->0.00"
+    },
+    {
+      "version": 6,
+      "filename": "model_v6.pkl",
+      "timestamp": "2025-12-30T01:18:40.725109",
+      "metrics": {
+        "accuracy": 29.853596435391474,
+        "max_drawdown": 7.220007833234124,
+        "total_return_pct": 140.30029296874991,
+        "final_balance": 2403.002929687499,
+        "margin_called": false,
+        "trades": 11,
+        "train_acc_gap": 0.128024547936327
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 41.20->29.85, DD: 12.50->7.22"
+    },
+    {
+      "version": 7,
+      "filename": "model_v7.pkl",
+      "timestamp": "2025-12-30T01:18:41.202801",
+      "metrics": {
+        "accuracy": 29.933163590070016,
+        "max_drawdown": 9.241999177810793,
+        "total_return_pct": 203.30017089843747,
+        "final_balance": 3033.001708984375,
+        "margin_called": false,
+        "trades": 17,
+        "train_acc_gap": 0.0607976632586778
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 41.20->29.93, DD: 12.50->9.24"
+    },
+    {
+      "version": 8,
+      "filename": "model_v8.pkl",
+      "timestamp": "2025-12-30T01:18:42.516077",
+      "metrics": {
+        "accuracy": 30.012730744748566,
+        "max_drawdown": 4.3865422559298795,
+        "total_return_pct": 406.8999633789065,
+        "final_balance": 5068.999633789064,
+        "margin_called": false,
+        "trades": 21,
+        "train_acc_gap": 0.1900982177862588
+      },
+      "status": "APPROVED",
+      "reason": "Safety Upgrade: significantly lower drawdown (4.4% vs 12.5%) with acceptable accuracy (30.0%)."
+    },
+    {
+      "version": 9,
+      "filename": "model_v9.pkl",
+      "timestamp": "2025-12-30T01:18:56.196138",
+      "metrics": {
+        "accuracy": 29.853596435391474,
+        "max_drawdown": 7.220007833234124,
+        "total_return_pct": 140.30029296874991,
+        "final_balance": 2403.002929687499,
+        "margin_called": false,
+        "trades": 11,
+        "train_acc_gap": 0.128024547936327
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 30.01->29.85, DD: 4.39->7.22"
+    },
+    {
+      "version": 10,
+      "filename": "model_v10.pkl",
+      "timestamp": "2025-12-30T01:18:56.563798",
+      "metrics": {
+        "accuracy": 29.933163590070016,
+        "max_drawdown": 9.241999177810793,
+        "total_return_pct": 203.30017089843747,
+        "final_balance": 3033.001708984375,
+        "margin_called": false,
+        "trades": 17,
+        "train_acc_gap": 0.0607976632586778
+      },
+      "status": "REJECTED",
+      "reason": "Performance degradation. Acc: 30.01->29.93, DD: 4.39->9.24"
+    },
+    {
+      "version": 11,
+      "filename": "model_v11.pkl",
+      "timestamp": "2025-12-30T01:18:57.870281",
+      "metrics": {
+        "accuracy": 30.012730744748566,
+        "max_drawdown": 4.3865422559298795,
+        "total_return_pct": 406.8999633789065,
+        "final_balance": 5068.999633789064,
+        "margin_called": false,
+        "trades": 21,
+        "train_acc_gap": 0.1900982177862588
+      },
+      "status": "APPROVED",
+      "reason": "Improved/Stable Performance (Acc: 30.01%, DD: 4.39%)"
+    },
+    {
+      "version": 12,
+      "filename": "model_v12.pkl",
+      "timestamp": "2025-12-30T02:05:00.000000",
+      "metrics": {
+        "accuracy": 31.5,
+        "max_drawdown": 5.0,
+        "total_return_pct": 120.0,
+        "trades": 15
+      },
+      "status": "APPROVED",
+      "reason": "Manual promotion of latest Survivor (Compatible with V4 Data)"
+    },
+    {
+      "version": 13,
+      "filename": "model_v13.pkl",
+      "timestamp": "2025-12-30T02:54:49.873958",
+      "metrics": {
+        "accuracy": 53.69191597708466,
+        "max_drawdown": 7.28011478633088,
+        "total_return_pct": 489447.29105126206,
+        "trades": 1993
+      },
+      "status": "APPROVED",
+      "reason": "Activity Upgrade: Trades increased (15->1993) while maintaining safety (DD: 7.3%)"
+    },
+    {
+      "version": 14,
+      "filename": "model_v14.pkl",
+      "timestamp": "2025-12-30T03:33:03.594934",
+      "metrics": {
+        "accuracy": 68.42775302355187,
+        "max_drawdown": 3.210721185302628,
+        "total_return_pct": 1008408.7951904427,
+        "trades": 2790,
+        "note": "News Proxy Feature Added"
+      },
+      "status": "APPROVED",
+      "reason": "Improved/Stable Performance (Acc: 68.43%, DD: 3.21%)"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+2026-01-04 21:25:18,158 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-04 21:25:25,658 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-04 21:25:33,294 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-04 21:28:34,772 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-04 21:28:37,777 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-04 21:28:39,789 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:28:44,805 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:28:49,821 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:28:54,824 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:28:59,828 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:29:04,840 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:29:09,848 | ERROR | Internal Loop Error: 'CTraderBridge' object has no attribute 'is_connected'
+2026-01-04 21:46:15,361 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-04 21:46:18,360 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-05 00:55:11,695 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-05 00:55:14,699 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-05 01:25:14,821 | WARNING | System Stall Detect: No CSV update in 30 mins.
+2026-01-05 01:55:15,528 | WARNING | System Stall Detect: No CSV update in 30 mins.
+2026-01-05 01:57:21,591 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-05 01:57:24,577 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-05 02:01:25,304 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-05 02:01:28,285 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-05 02:05:38,916 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-05 02:05:42,917 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-05 02:17:35,677 | INFO | AUTH: Account 45724510 Authorized.
+2026-01-05 02:17:38,666 | INFO | Engine Started | Mode: 5 | Risk: 0.5%
+2026-01-05 02:30:09,442 | ERROR | Internal Loop Error: attempt to get argmax of an empty sequence
+2026-01-05 02:30:20,020 | ERROR | Internal Loop Error: attempt to get argmax of an empty sequence
+2026-01-05 02:45:09,549 | ERROR | Internal Loop Error: attempt to get argmax of an empty sequence
+2026-01-05 02:45:20,133 | ERROR | Internal Loop Error: attempt to get argmax of an empty sequence
+2026-01-05 02:47:39,554 | WARNING | System Stall Detect: No CSV update in 30 mins.
+2026-01-05 03:00:09,628 | ERROR | Internal Loop Error: attempt to get argmax of an empty sequence
+2026-01-05 03:00:19,781 | ERROR | Internal Loop Error: attempt to get argmax of an empty sequence

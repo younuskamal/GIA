@@ -41,6 +41,9 @@ class RiskRules:
     # Cooldown: Candles to wait after a loss
     COOLDOWN_AFTER_LOSS = 3
 
+    # Pyramiding: Max concurrent trades
+    MAX_CONCURRENT_TRADES = 3
+
     # News Filter: Don't trade if impact > threshold
     MAX_NEWS_IMPACT = 2  # 3=High, 2=Medium, 1=Low
 

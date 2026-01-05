@@ -76,22 +76,30 @@ class TripleConsensusModel:
         bw = df['bb_width']
         df['coiling'] = bw / (bw.rolling(50).mean() + 1e-6)
         df['velocity'] = close.diff(5) / (std20 + 1e-6)
-        df['vol_ratio'] = (df['vol_20'] / df['vol_20'].rolling(200).mean()).fillna(1.0)
-        df['vol_regime'] = np.where(df['vol_ratio'] > 1.2, 1, 0)
-        df['atr_norm'] = df['atr'] / (close + 1e-6)
         
-        # Candle Geometry
-        avg_body = (df['close'] - df['open']).abs().rolling(20).mean()
-        df['body_rel'] = (df['close'] - df['open']).abs() / (avg_body + 1e-6)
-        df['body_size'] = (df['close'] - df['open']) / (df['open'] + 1e-6)
-        df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (close + 1e-6)
-        df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (close + 1e-6)
-        df['wick_ratio'] = (df['upper_wick'] - df['lower_wick']) / (df['upper_wick'] + df['lower_wick'] + 1e-6)
+        # 🚀 Institutional High-Intelligence
+        df['price_acceleration'] = df['velocity'].diff(3)
+        df['liquidity_shock'] = df['volume'] / (df['volume'].rolling(50).mean() + 1e-9)
+        
+        diff_sum = close.diff().abs().rolling(10).sum()
+        range_sum = (df['high'].rolling(10).max() - df['low'].rolling(10).min() + 1e-9)
+        df['market_entropy'] = diff_sum / range_sum
+        
+        ma50 = close.rolling(50).mean()
+        df['exhaustion_index'] = (close - ma50).abs() / (std20 * 2 + 1e-9)
+        
+        df['div_proxy'] = close.pct_change(5) - df['rsi'].pct_change(5)
+        
+        lo100 = close.rolling(100).min()
+        hi100 = close.rolling(100).max()
+        df['structure_strength'] = (close - lo100) / (hi100 - lo100 + 1e-9)
 
         # Temporal & Harmony
-        df['is_peak'] = ((df['date'].dt.hour >= 7) & (df['date'].dt.hour <= 22)).astype(int)
+        df['hour'] = df['date'].dt.hour
+        df['is_peak'] = ((df['hour'] >= 7) & (df['hour'] <= 22)).astype(int)
         df['is_peak_hour'] = df['is_peak']
         df['trend_harmony'] = (np.sign(df['macd_norm']) + np.sign(df.get('macd_m30', 0)) + np.sign(df.get('macd_h1', 0))) / 3.0
+
         
         # Final Guard
         df = df.replace([np.inf, -np.inf], 0).fillna(0)
@@ -141,13 +149,23 @@ class TripleConsensusModel:
         # 4. Get Signals from all 3
         # v14 (Risk Governor)
         m14 = self.models['risk']
-        p14 = m14['model'].predict(latest[m14['feature_columns']])[0]
+        try:
+            p14 = m14['model'].predict(latest[m14['feature_columns']])[0]
+        except KeyError as e:
+            print(f"   DEBUG [Consensus/Risk]: Missing {e} in {list(latest.columns)}")
+            return {"success": False, "error": f"Consensus Risk model missing features: {e}"}
+
         # p14: 0=WAIT, 1=BUY, 2=SELL
         
         # v2 PRO (Core)
         m2p = self.models['core']
-        pr2p = m2p['model'].predict_proba(latest[m2p['feature_columns']])[0]
+        try:
+            pr2p = m2p['model'].predict_proba(latest[m2p['feature_columns']])[0]
+        except KeyError as e:
+            print(f"   DEBUG [Consensus/Core]: Missing {e} in {list(latest.columns)}")
+            return {"success": False, "error": f"Consensus Core model missing features: {e}"}
         s2p = m2p['label_encoder'].inverse_transform([np.argmax(pr2p)])[0]
+
         c2p = np.max(pr2p)
         
         # v2 FLASH (Tactical)

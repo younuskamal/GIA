@@ -1,38 +1,84 @@
 
 """
 GIA Production Engine - DIRECT API EXECUTION
-Standard: XAUUSD M15
-Sync: Local CSV + Direct OpenAPI 
+Standard: XAUUSD M15 (LOCKED)
+Sync: Local CSV (C:\GIA_DATA) + Direct OpenAPI 
+Version: 3.0 (Self-Healing & Risk Selective)
 """
 import time
 import sys
 import os
-import joblib
+import json
+import logging
 from datetime import datetime
+from colorama import Fore, Style, init
 
 # Path Fix
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
 
+# Initialize Colorama & Logging
+init(autoreset=True)
+logging.basicConfig(
+    filename='live_audit.log',
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s'
+)
+
+from backend.engine.consensus import TripleConsensusModel
+from backend.engine.inference import GoldAnalysisModel
+from backend.connectors.ctrader_bridge import CTraderBridge
+from backend.core.rules import RiskRules
+
+# 🦁 INSTITUTIONAL LOCK: Production Parameters
+# 🦁 Cross-Platform Path Mapping
+if os.name == 'nt': # Windows
+    DATA_FOLDER = r"C:\GIA_DATA"
+else: # Linux/Ubuntu (DigitalOcean)
+    DATA_FOLDER = "/var/gia_data"
+
+if not os.path.exists(DATA_FOLDER):
+    os.makedirs(DATA_FOLDER, exist_ok=True)
+
+ASSET = "XAUUSD"
+TIMEFRAME = "M15"
+
 class MockEncoder:
     def inverse_transform(self, idxs):
         mapping = {0: 'WAIT', 1: 'BUY', 2: 'SELL'}
         return [mapping[i] for i in idxs]
 
-from backend.engine.consensus import TripleConsensusModel
-from backend.engine.inference import GoldAnalysisModel
-from backend.connectors.ctrader_bridge import CTraderBridge
-from colorama import Fore, Style, init
+import __main__
+__main__.MockEncoder = MockEncoder
 
-# Initialize Colorama
-init(autoreset=True)
+def get_latest_ts(filename):
+    """Safely reads the latest timestamp from a CSV file."""
+    fpath = os.path.join(DATA_FOLDER, filename)
+    if not os.path.exists(fpath): return None
+    try:
+        with open(fpath, 'r') as f:
+            lines = f.readlines()
+            if len(lines) < 2: return None
+            last_line = lines[-1].strip()
+            if last_line.count(',') < 5: return None
+            return last_line.split(',')[0]
+    except Exception as e:
+        logging.error(f"Error reading {filename}: {str(e)}")
+        return None
 
-# CONFIG
-CSV_PATH = r"C:\GIA_DATA\XAUUSD_M15.csv"
-READY_FILE = r"C:\GIA_DATA\XAUUSD_M15.ready"
+import argparse
 
 def run_production_engine():
+    # 0. Argument Parsing for Server Mode
+    parser = argparse.ArgumentParser(description="GIA Institutional Live Engine")
+    parser.add_argument('--model_idx', type=str, help='Index of model or C')
+    parser.add_argument('--risk', type=float, help='Dynamic Risk %')
+    parser.add_argument('--lev', type=int, help='Account Leverage')
+    parser.add_argument('--guard', type=int, help='Margin Guard %')
+    args = parser.parse_args()
+
+    # 1. Load Models Intelligence
     models_main_dir = os.path.join(BASE_DIR, 'backend', 'models')
     models_pro_dir = os.path.join(BASE_DIR, 'GIA_SIGNAL_PRO', 'models')
     
@@ -40,185 +86,193 @@ def run_production_engine():
     models_pro = sorted([f for f in os.listdir(models_pro_dir) if f.endswith('.pkl')]) if os.path.exists(models_pro_dir) else []
     
     model_paths = {m: os.path.join(models_main_dir, m) for m in models_main}
-    for m in models_pro:
-        model_paths[m] = os.path.join(models_pro_dir, m)
+    for m in models_pro: model_paths[m] = os.path.join(models_pro_dir, m)
     
     all_models = sorted(list(model_paths.keys()))
     
     print(f"\n{Fore.CYAN}╔════════════════════════════════════════════════════════╗")
-    print(f"║ {Fore.WHITE}      🦁 GIA LIVE COMMAND CENTER - DEMO API          {Fore.CYAN}║")
+    print(f"║ {Fore.WHITE}      🦁 GIA LIVE COMMAND CENTER - v3.0 PRO          {Fore.CYAN}║")
     print(f"╚════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
     
-    print(f"\n {Fore.YELLOW}SELECT EXECUTION MODE:{Style.RESET_ALL}")
-    for i, m in enumerate(all_models):
-        dir_label = "[PRO]" if "SIGNAL_PRO" in m else "[CORE]"
-        print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {Fore.LIGHTBLACK_EX}{dir_label}{Style.RESET_ALL}")
-    print(f"  [{Fore.GREEN}C{Style.RESET_ALL}] TRIPLE CONSENSUS (v14 + v2_PRO + v2_FLASH)")
+    # 2. Institutional Configuration
+    if args.model_idx:
+        choice = args.model_idx.upper()
+        USER_RISK = args.risk if args.risk is not None else 0.5
+        LEVERAGE = args.lev if args.lev is not None else 500
+        MARGIN_GUARD = args.guard if args.guard is not None else 100
+    else:
+        print(f"\n {Fore.YELLOW}STEP 1: SELECT EXECUTION MODE{Style.RESET_ALL}")
+        for i, m in enumerate(all_models):
+            label = "[PRO]" if "SIGNAL_PRO" in m else "[CORE]"
+            print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {label}")
+        print(f"  [{Fore.GREEN}C{Style.RESET_ALL}] TRIPLE CONSENSUS (v14 + v2_PRO + v2_FLASH)")
+        
+        choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
+
+        print(f"\n {Fore.YELLOW}STEP 2: RISK & MARGIN PARAMETERS{Style.RESET_ALL}")
+        try:
+            risk_input = input(f"  [1] Dynamic Risk % per trade (0.1 to 2.0) [Default 0.5] > ").strip()
+            USER_RISK = float(risk_input) if risk_input else 0.5
+            
+            leverage_input = input(f"  [2] Account Leverage [Default 500] > ").strip()
+            LEVERAGE = int(leverage_input) if leverage_input else 500
+            
+            margin_input = input(f"  [3] Margin Guard % (Safety Buffer) [Default 100] > ").strip()
+            MARGIN_GUARD = int(margin_input) if margin_input else 100
+        except ValueError:
+            print(f"{Fore.RED}⚠️ Invalid numeric input. Reverting to Defaults: Risk 0.5%, Leverage 500, Margin 100%{Style.RESET_ALL}")
+            USER_RISK, LEVERAGE, MARGIN_GUARD = 0.5, 500, 100
+
+    print(f" {Fore.GREEN}✅ Production Config Locked: Risk {USER_RISK}% | Lev 1:{LEVERAGE} | Guard {MARGIN_GUARD}%{Style.RESET_ALL}")
     
-    choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
-    
+    # 3. Initialize Analysis Engine
     analyzer = None
     is_consensus = False
     
     if choice == 'C':
         analyzer = TripleConsensusModel(models_main_dir)
         is_consensus = True
-        if len(analyzer.models) < 3:
-            print(f"{Fore.RED}❌ Error: Consensus requires all 3 models in {models_main_dir}{Style.RESET_ALL}")
-            return
     elif choice.isdigit() and 1 <= int(choice) <= len(all_models):
         m_name = all_models[int(choice)-1]
-        m_path = model_paths[m_name]
-        analyzer = GoldAnalysisModel(model_path=m_path)
+        analyzer = GoldAnalysisModel(model_path=model_paths[m_name])
     else:
-        print(f"{Fore.RED}❌ Invalid selection.{Style.RESET_ALL}")
+        print(f"{Fore.RED}❌ ERROR: Invalid Model Selection. Shutting down.{Style.RESET_ALL}")
         return
 
-    # 2. Connect to API
+    # 4. Connect to cTrader Bridge
     bridge = CTraderBridge(active_strategy_handler=analyzer.strategy if hasattr(analyzer, 'strategy') else None) 
     if not bridge.connect():
-        print(f"{Fore.RED}❌ FAILED: Could not connect to cTrader Open API.{Style.RESET_ALL}")
+        print(f"{Fore.RED}❌ FAILED: cTrader OpenAPI Connection Refused. Ensure Proxy/Terminal is running.{Style.RESET_ALL}")
         return
 
     # State
-    last_processed_ts = None
+    last_processed_ts = get_latest_ts(f"{ASSET}_M15.csv")
     last_check_time = time.time()
+    last_sync_time = 0
     
-    data_folder = r"C:\GIA_DATA"
-    m15_ready_path = os.path.join(data_folder, "XAUUSD_M15.ready")
     mode_name = "TRIPLE CONSENSUS" if is_consensus else os.path.basename(analyzer.model_path)
     print(f"\n{Fore.GREEN}🟢 GIA INSTITUTIONAL LIVE [{mode_name}] ACTIVE.{Style.RESET_ALL}")
-    print(f"📡 TRIGGER: Strictly M15 Close | PATH: {data_folder}")
+    print(f"📡 MODE: Autonomous API Fetching | PATH: {DATA_FOLDER}")
+    logging.info(f"Engine Started | Mode: {choice} | Risk: {USER_RISK}%")
+
+    # Initial Data Sync
+    print(f"📡 Requesting Initial Global Market Snapshot...")
+    bridge.fetch_live_data()
+    time.sleep(2) # Allow sync
 
     try:
         while True:
-            # 1. Real-Time Account Sync
-            open_count = bridge.get_open_position_count()
-            equity = bridge.current_equity
-            
-            # 2. STRICT M15 TRIGGER CHECK
-            trigger_detected = False
-            if os.path.exists(m15_ready_path):
-                # Small stability delay to ensure file lock is released by cTrader
-                time.sleep(0.2)
-                trigger_detected = True
-            
-            if trigger_detected:
-                print(f"\n🔔 [M15 TRIGGER] Detectated XAUUSD_M15.ready")
-                
-                # --- DATA VALIDATION & SYNC REPORT ---
-                sync_status = {"M15": "FAIL", "M30": "FAIL", "H1": "FAIL"}
-                sync_times = {"M15": "N/A", "M30": "N/A", "H1": "N/A"}
-                
-                def get_latest_ts(filename):
-                    fpath = os.path.join(data_folder, filename)
-                    if not os.path.exists(fpath): return None
-                    try:
-                        with open(fpath, 'r') as f:
-                            lines = f.readlines()
-                            if len(lines) < 2: return None
-                            last_line = lines[-1].strip()
-                            # Check for non-zero OHLC (simple check: length and comma count)
-                            if last_line.count(',') < 5: return None
-                            ts = last_line.split(',')[0]
-                            return ts
-                    except: return None
-
-                # Validate M15 (The Boss)
-                m15_ts = get_latest_ts("XAUUSD_M15.csv")
-                if m15_ts and m15_ts != last_processed_ts:
-                    sync_status["M15"] = "OK"
-                    sync_times["M15"] = m15_ts
-                    last_processed_ts = m15_ts
-                    
-                    # Check HTFs
-                    for tf in ["M30", "H1"]:
-                        ts = get_latest_ts(f"XAUUSD_{tf}.csv")
-                        if ts:
-                            sync_status[tf] = "OK"
-                            sync_times[tf] = ts
-                        else:
-                            sync_status[tf] = "SKIPPED (Outdated/Missing)"
-
-                    # PRINT LOGGING AS REQUESTED
-                    print(f"\n{Fore.BLUE}╔════════════ [DATA SYNC] ════════════╗{Style.RESET_ALL}")
-                    print(f"║ M15: {sync_status['M15']:<4} | Time: {sync_times['M15']}")
-                    print(f"║ M30: {sync_status['M30']:<4} | Time: {sync_times['M30']}")
-                    print(f"║ H1 : {sync_status['H1']:<4} | Time: {sync_times['H1']}")
-                    print(f"{Fore.BLUE}╚═════════════════════════════════════╝{Style.RESET_ALL}")
-
-                    last_check_time = time.time()
-
-                    if open_count >= 1:
-                        print(f"   {Fore.YELLOW}[FILTER] Skipping: Position already open in cTrader.{Style.RESET_ALL}")
+            try:
+                # 1. Heartbeat & Stability Check
+                if not bridge.connected:
+                    print(f"\n{Fore.RED}⚠️ CONNECTION LOST! Attempting Self-Healing Reconnect...{Style.RESET_ALL}")
+                    if bridge.connect():
+                        print(f"{Fore.GREEN}✅ RECONNECTED SUCCESSFULLY.{Style.RESET_ALL}")
                     else:
-                        # 3. AI Analysis
-                        print(f"   ⌛ Running Triple Consensus Analytics...")
+                        time.sleep(5)
+                        continue
+
+                now = datetime.now()
+                equity = bridge.current_equity
+                open_count = bridge.get_open_position_count()
+                
+                # 2. AUTONOMOUS TRIGGER & SYNC
+                trigger_detected = False
+                
+                # Auto-sync every 10 seconds
+                if time.time() - last_sync_time > 10:
+                    # Clear dashboard line before printing sync info
+                    sys.stdout.write("\n")
+                    bridge.fetch_live_data()
+                    last_sync_time = time.time()
+                    # Trigger only at start of 15-min candle (with 5s safety buffer)
+                    if now.minute % 15 == 0 and 5 <= now.second <= 25:
+                        trigger_detected = True
+                
+                if trigger_detected:
+                    m15_ts = get_latest_ts(f"{ASSET}_M15.csv")
+                    if m15_ts and m15_ts != last_processed_ts:
+                        # 🦁 INSTITUTIONAL SAFETY: Ignore old data from before market open
+                        try:
+                            sig_dt = datetime.strptime(m15_ts, '%Y-%m-%d %H:%M:%S')
+                            if (datetime.now() - sig_dt).total_seconds() > 1800: # Older than 30m
+                                last_processed_ts = m15_ts
+                                continue
+                        except: pass
+                        
+                        print(f"\n{Fore.WHITE}{'='*60}")
+                        print(f" {Fore.YELLOW}🦁 GIA SIGNAL DETECTED | TS: {m15_ts} | Equity: ${equity:,.2f}")
+                        print(f"{Fore.WHITE}{'='*60}")
+                        
+                        # A. Run AI Analysis
                         res = analyzer.analyze()
                         if res['success']:
                             signal = res['signal']
-                            expl = res['explanation']
                             atr = res['atr']
                             size_mult = res.get('sizing_multiplier', 1.0)
+                            expl = res['explanation']
                             
-                            if is_consensus:
-                                brains = res['brains']
-                                print(f"   🧠 BRAINS: [Risk: {brains['risk']}] [Core: {brains['core']}] [Flash: {brains['flash']}]")
-                            
-                            print(f"   📜 STATUS: {Fore.CYAN}{expl}{Style.RESET_ALL}")
+                            print(f"   📜 ANALYTICS: {Fore.CYAN}{expl}{Style.RESET_ALL}")
+                            logging.info(f"Signal: {signal} | ATR: {atr} | Expl: {expl}")
 
-                            if signal in ['BUY', 'SELL']:
-                                # Risk parameters (Target 1.0% base)
-                                risk_amt = equity * (1.0 / 100.0) * size_mult
-                                sl_val, tp_val = atr * 2.0, atr * 3.5
+                            if signal in ['BUY', 'SELL'] and open_count < RiskRules.MAX_CONCURRENT_TRADES:
+                                # B. Professional Risk Calculation
+                                risk_usd = equity * (USER_RISK / 100.0) * size_mult
+                                sl_val = atr * 2.0
+                                tp_val = atr * 3.5
+                                sl_pips, tp_pips = sl_val * 10, tp_val * 10
+                                lots = max(0.01, round(risk_usd / (100 * sl_val), 2))
                                 
-                                sl_pips = sl_val * 10
-                                tp_pips = tp_val * 10
-                                
-                                lots = risk_amt / (100 * sl_val)
-                                lots = max(0.01, round(lots, 2))
+                                # C. Margin Check
+                                price = bridge.latest_ask if signal == 'BUY' else bridge.latest_bid
+                                if price:
+                                    margin_req = (price * lots * 100) / LEVERAGE
+                                    if equity < (margin_req * (MARGIN_GUARD / 100.0 + 0.5)):
+                                        print(f"   {Fore.RED}⚠️ MARGIN GUARD REJECT: Too risky for current equity.{Style.RESET_ALL}")
+                                        continue
 
-                                print(f"   {Fore.GREEN}🎯 EXECUTION: {signal} {lots} Lots | SL: {round(sl_pips,1)} | TP: {round(tp_pips,1)}{Style.RESET_ALL}")
-                                
-                                success = bridge.send_market_order(
-                                    direction=signal,
-                                    lots=lots,
-                                    sl_pips=sl_pips,
-                                    tp_pips=tp_pips
-                                )
-                                
-                                if success:
-                                    print(f"   ✅ SUCCESS: Order sent to OpenAPI.")
-                                else:
-                                    print(f"   ❌ ERROR: Transmission Failed.")
-                        else:
-                            print(f"   {Fore.RED}⚠️ Analysis Error: {res.get('error')}{Style.RESET_ALL}")
+                                # D. Order Transmission
+                                print(f"   🎯 EXECUTION: {signal} {lots} Lots | SL: {round(sl_pips,1)} | TP: {round(tp_pips,1)}")
+                                bridge.send_market_order(signal, lots, sl_pips, tp_pips)
 
-                    # 4. Surgical Cleanup of M15 ready file
-                    if os.path.exists(m15_ready_path):
-                        try:
-                            os.remove(m15_ready_path)
-                            print(f"   🧹 Cleaned: XAUUSD_M15.ready")
-                        except: pass
+                        # E. Clean State
+                        last_processed_ts = m15_ts
+                        last_check_time = time.time()
                 else:
-                    print(f"   ❌ [SYNC ERROR] Latest M15 timestamp rejected or duplicate. Skipping cycle.")
-                    # Still clean up M15 to avoid infinite loop on rejected TS
-                    if os.path.exists(m15_ready_path):
-                        try: os.remove(m15_ready_path)
-                        except: pass
+                    # If M15 isn't updated yet, we wait and retry sync
+                    pass
 
-            if time.time() - last_check_time > 1200: # 20 mins monitor
-                print(f"\n{Fore.RED}⚠️ STALL DETECTED: No M15 update for 20 minutes. Check your cTrader CSV Export settings.{Style.RESET_ALL}")
-                last_check_time = time.time()
+                # 3. Status Display (Heartbeat)
+                bid, ask = (bridge.latest_bid or 0.0), (bridge.latest_ask or 0.0)
+                n_safe, _ = analyzer.strategy.news_guard.check_safety()
+                m_safe, _ = analyzer.strategy.market_guard.check_gap_risk()
+                
+                status_color = Fore.GREEN if n_safe and m_safe else Fore.RED
+                safety_txt = "SECURE" if n_safe and m_safe else "PAUSED"
+                
+                # Clear line and print dashboard
+                sys.stdout.write("\r\033[K") # Return carriage and clear current line
+                dashboard = f"{Fore.WHITE}LIVE: {ASSET} | {Fore.YELLOW}{bid:>8.2f}/{ask:<8.2f}{Fore.WHITE} | Eq: ${equity:,.2f} | Pos: {open_count} | 🛡️ {status_color}{safety_txt}{Style.RESET_ALL}"
+                sys.stdout.write(dashboard)
+                sys.stdout.flush()
+                
+                if time.time() - last_check_time > 1800: # 30 min stall
+                    logging.warning("System Stall Detect: No CSV update in 30 mins.")
+                    last_check_time = time.time()
 
-            time.sleep(1) # Frequency of check
-            bid = bridge.latest_bid or 0.0
-            ask = bridge.latest_ask or 0.0
-            print(f"{Fore.WHITE}Heartbeat: {last_processed_ts} | Price: {Fore.YELLOW}{bid:.2f}/{ask:.2f}{Fore.WHITE} | Equity: ${round(equity, 2)} | Pos: {open_count}{Style.RESET_ALL}", end='\r')
+                time.sleep(1)
+
+            except Exception as e:
+                print(f"\n{Fore.RED}💥 CRITICAL INTERNAL ERROR: {str(e)}{Style.RESET_ALL}")
+                logging.error(f"Internal Loop Error: {str(e)}")
+                time.sleep(5) # Cooldown before retry
 
     except KeyboardInterrupt:
-        print(f"\n{Fore.RED}🛑 Terminating GIA Live Engine...{Style.RESET_ALL}")
+        print(f"\n{Fore.RED}🛑 Manual Shutdown Initiated.{Style.RESET_ALL}")
         bridge.shutdown()
 
 if __name__ == "__main__":
-    run_production_engine()
+    try:
+        run_production_engine()
+    except Exception as e:
+        print(f"Fatal System Failure: {str(e)}")

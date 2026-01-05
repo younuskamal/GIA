@@ -23,7 +23,7 @@ class BrokerSimulator:
         "TOPSTEP": BrokerProfile("TOPSTEP (Prop)", 0.30, 0.60, 6.0, slippage_probability=0.20, slippage_max=0.10),
         "VANTAGE": BrokerProfile("VANTAGE (Inst)", 0.15, 0.35, 6.0, slippage_probability=0.08, slippage_max=0.04),
         "TICKMILL": BrokerProfile("TICKMILL (Raw)", 0.10, 0.30, 4.0, slippage_probability=0.12, slippage_max=0.05),
-        "XM": BrokerProfile("XM (Ultra-Low)", 0.60, 1.20, 0.0, slippage_probability=0.15, slippage_max=0.08),
+        "XM": BrokerProfile("XM (Ultra-Low)", 0.18, 0.35, 0.0, slippage_probability=0.12, slippage_max=0.04),
         "DOOMSDAY": BrokerProfile("THE DOOMSDAY MACHINE", 2.50, 5.00, 15.0, slippage_probability=0.80, slippage_max=0.50)
     }
 

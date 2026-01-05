@@ -97,9 +97,35 @@ class GIA_Apex_Distiller:
             ma = close.rolling(s).mean()
             df[f'ema_{s}_dist'] = (close - ma) / (ma + 1e-9)
         
-        df['ema_cross'] = (df['ema_9_dist'] - df['ema_21_dist'])
+        # 🚀 Institutional High-Intelligence Features (Direct Injection)
+        df['velocity'] = close.diff(1) / (close.shift(1) + 1e-9)
+        df['acceleration'] = df['velocity'].diff(1)
+        
+        # VSA Logic: Volume/Price Spread Analysis
+        df['vol_delta'] = df['volume'] * np.sign(close - df['open'])
+        df['vol_momentum'] = df['vol_delta'].rolling(5).mean() / (df['volume'].rolling(20).mean() + 1e-9)
+        
+        df['liquidity_shock'] = df['volume'] / (df['volume'].rolling(20).mean() + 1e-9)
+        
+        # Market Entropy (Efficiency Ratio)
+        diff_sum = close.diff().abs().rolling(10).sum()
+        range_sum = (df['high'].rolling(10).max() - df['low'].rolling(10).min() + 1e-9)
+        df['market_entropy'] = diff_sum / range_sum
+
         df['atr'] = calculate_atr(df, 14)
         df['atr_norm'] = df['atr'] / (close + 1e-9)
+        
+        # 🕯️ Candle Anatomy IQ
+        df['body_size'] = (df['close'] - df['open']).abs()
+        df['wick_size'] = (df['high'] - df['low']) - df['body_size']
+        df['candle_strength'] = df['body_size'] / (df['high'] - df['low'] + 1e-9)
+        
+        # 📏 Distance Logic (Mean Reversion Awareness)
+        ma9 = close.rolling(9).mean()
+        df['dist_ma9'] = (close - ma9) / (ma9 + 1e-9)
+        
+        # 🌍 Regime Intel
+        df = self.regime_engine.classify(df) # Adds 'regime_flag'
         
         # Session Awareness
         df['hour'] = df['date'].dt.hour
@@ -107,46 +133,57 @@ class GIA_Apex_Distiller:
         
         self.features = [
             'rsi', 'rsi_slope', 'momentum', 'bb_width', 'bb_pos', 'bb_slope',
-            'ema_9_dist', 'ema_21_dist', 'ema_50_dist', 'ema_200_dist', 'ema_cross',
+            'ema_9_dist', 'ema_21_dist', 'ema_50_dist', 'ema_200_dist',
             'atr_norm', 'is_high_liquidity',
-            'rsi_m5', 'trend_m5', 'vol_m5', 'rsi_m15', 'trend_m15', 'rsi_h1', 'trend_h1'
+            'rsi_m5', 'trend_m5', 'vol_m5', 'rsi_m15', 'trend_m15', 'rsi_h1', 'trend_h1',
+            'velocity', 'acceleration', 'liquidity_shock', 'market_entropy',
+            'candle_strength', 'dist_ma9', 'regime_flag', 'vol_momentum'
         ]
+        
+        # 🧪 Add Lags for Temporal IQ (What happened in the last 3 minutes?)
+        for feat in ['velocity', 'candle_strength', 'vol_momentum']:
+            for lag in [1, 2, 3]:
+                df[f'{feat}_lag{lag}'] = df[feat].shift(lag)
+                self.features.append(f'{feat}_lag{lag}')
         
         return df.replace([np.inf, -np.inf], 0).fillna(0)
 
     def label_data(self, df):
         """
-        🚀 TARGET: 10+ Signals/Day | Precision Entry | Small Account Protection
+        🚀 TARGET: Abrasive Institutional Labeling (v5.0)
+        Only signals that SURVIVE spread, commission, and slippage are labeled.
         """
-        print("🧠 Labeling for v4.0 | Target: 10+ Accurate Daily Signals...")
-        horizon = 10 # 10-minute target window for definitive profit
+        print("🧠 Labeling with Hyper-Frequency Pulse (UHF Mode)...")
+        horizon = 2 # Hyper-Pulse: 2-minute pulse capture
+        friction = 0.01 
         
         df['atr_val'] = calculate_atr(df, period=14)
-        # Session-Adaptive Sensitivity: Be more aggressive during high-volume sessions
-        df['sensitivity'] = np.where(df['is_high_liquidity'], 0.12, 0.18)
-        df['atr_thresh'] = (df['atr_val'] * df['sensitivity']).rolling(3).mean()
+        # Pulse Targets: Capture any movement >= 0.01 (1 Gold Pip)
+        df['min_target'] = 0.01
         
         future_max = df['high'].rolling(horizon).max().shift(-horizon)
         future_min = df['low'].rolling(horizon).min().shift(-horizon)
         
         # Logic: 
-        # 1. Reach TP (ATR Thresh) 
-        # 2. Don't hit SL (ATR Thresh * 0.7) - Prioritize Small Account Survival
-        # 3. Align with M5 Context
-        buy_cond = (future_max - df['close'] > df['atr_thresh']) & \
-                   (df['close'] - future_min < df['atr_thresh'] * 0.7) & \
-                   (df['trend_m5'] >= 0)
+        # 1. Potential Gain - Friction > Min Target
+        # 2. Risk (Max Adverse Excursion) < Min Target * 1.5 (High tolerance for UHF)
+        # 3. Universal Momentum (No Trend Filter)
+        buy_cond = ((future_max - df['close']) - friction > df['min_target']) & \
+                   (df['close'] - future_min < df['min_target'] * 1.5) & \
+                   (df['trend_m5'] >= -4.0)
                    
-        sell_cond = (df['close'] - future_min > df['atr_thresh']) & \
-                    (future_max - df['close'] < df['atr_thresh'] * 0.7) & \
-                    (df['trend_m5'] <= 0)
+        sell_cond = ((df['close'] - future_min) - friction > df['min_target']) & \
+                    (future_max - df['close'] < df['min_target'] * 1.5) & \
+                    (df['trend_m5'] <= 4.0)
         
         df['target'] = 0 
         df.loc[buy_cond, 'target'] = 1 
         df.loc[sell_cond, 'target'] = 2 
         
-        # 🚫 CLEANUP: Reject signals during 3:00-7:00 AM (Low spread efficiency)
-        df.loc[(df['hour'] >= 3) & (df['hour'] <= 6), 'target'] = 0
+        # 🟢 Universal 24/7 Access: No hour filters for UHF
+        
+        signals = len(df[df['target'] != 0])
+        print(f"✅ GIA Intelligence: Extracted {signals} signals that survive friction.")
         
         return df.dropna()
 
@@ -173,33 +210,42 @@ class GIA_Apex_Distiller:
         
         print(f"📈 Raw Targets: Buy: {len(buy)} | Sell: {len(sell)} | Skip: {len(skip)}")
         
-        target_skip_size = int((len(buy) + len(sell)) / 3.0)
+        # ⚖️ Dynamic Balancing: Ensure 'Wait' doesn't overwhelm the model
+        # Target a 1:1 ratio between signals and wait to make the model "sharp"
+        target_skip_size = len(buy) + len(sell)
         skip_sampled = skip.sample(n=min(len(skip), target_skip_size), random_state=42)
         
         final_train = pd.concat([skip_sampled, buy, sell]).sample(frac=1.0, random_state=42)
+        # ⚖️ UHF Predator Balancing (v11.0)
+        # We use heavy weighting to force signal detection for high-frequency density
         X_train, y_train = final_train[self.features], final_train['target']
         X_val, y_val = val_df[self.features], val_df['target']
         
-        weights = compute_sample_weight('balanced', y_train)
+        # 5:1 Weighting: Signals are 5x more important than 'Wait'
+        weights = np.ones(len(y_train))
+        weights[y_train == 1] = 5.0
+        weights[y_train == 2] = 5.0
+        weights[y_train == 0] = 1.0
         
-        # 🧠 NUCLEAR DEEP BOOSTING (v1.0.1 Config)
+        # 🧠 NUCLEAR DEEP SNIPER BOOSTING (v11.0 - Predator Edition)
         model = xgb.XGBClassifier(
-            max_depth=7,
-            learning_rate=0.012,
-            n_estimators=5000,
+            max_depth=10,            # Deeper trees for micro-burst detection
+            learning_rate=0.02,      # Faster learning for pulse patterns
+            n_estimators=12000,      # Massive ensemble for stability
             objective='multi:softprob',
             num_class=3,
             tree_method='hist',
-            subsample=0.85,
-            colsample_bytree=0.85,
-            gamma=0.1,
-            min_child_weight=2,
-            reg_alpha=0.1, # L1 Regularization to prevent noise-fitting
-            reg_lambda=1.0, # L2 Regularization
+            subsample=0.9,           # Higher sample usage for UHF
+            colsample_bytree=0.9,
+            gamma=0.05,
+            min_child_weight=1,      # Max sensitivity to micro-clusters
+            reg_alpha=0.1,
+            reg_lambda=0.5,
+            max_delta_step=5,        # High stability for heavy weighting
             random_state=42
         )
         
-        print("🛠️ Phase 1: Training Deep Sniper Core...")
+        print(f"🛠️ Phase 1: Training Predator UHF Core on {len(X_train)} pulses...")
         model.fit(X_train, y_train, sample_weight=weights, 
                   eval_set=[(X_val, y_val)], early_stopping_rounds=150, verbose=100)
         
@@ -214,16 +260,17 @@ class GIA_Apex_Distiller:
             'features': self.features,
             'label_encoder': MockEncoder(),
             'metadata': {
-                'version': '1.0.1',
-                'mode': 'Small Account High-Freq',
-                'trained_until': '2023-12-31',
+                'version': '1.0.2',
+                'mode': 'Institutional Abrasive (High-Friction Resistance)',
+                'trained_at': datetime.now().strftime('%Y-%m-%d %H:%M'),
                 'training_size': len(X_train)
             }
         }
         
-        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
-        joblib.dump(save_data, MODEL_PATH)
-        print(f"✅ GIA_SIGNAL_PRO v1.0.1 SAVED: {MODEL_PATH}")
+        PREDATOR_PATH = MODELS_DIR / "GIA_SIGNAL_PREDATOR.pkl"
+        os.makedirs(os.path.dirname(PREDATOR_PATH), exist_ok=True)
+        joblib.dump(save_data, PREDATOR_PATH)
+        print(f"✅ GIA_SIGNAL_PREDATOR v1.0.1 SAVED: {PREDATOR_PATH}")
 
 if __name__ == "__main__":
     trainer = GIA_Apex_Distiller()

@@ -16,7 +16,7 @@ from ctrader_open_api.messages.OpenApiMessages_pb2 import (
     ProtoOAApplicationAuthReq, ProtoOAAccountAuthReq, 
     ProtoOATraderReq, ProtoOAReconcileReq, ProtoOANewOrderReq,
     ProtoOASymbolsListReq, ProtoOAErrorRes, ProtoOASymbolByIdReq,
-    ProtoOAAmendPositionSLTPReq
+    ProtoOAAmendPositionSLTPReq, ProtoOAGetTrendbarsReq
 )
 from ctrader_open_api.messages.OpenApiCommonMessages_pb2 import ProtoMessage
 
@@ -37,6 +37,9 @@ fh = logging.FileHandler(os.path.join(BASE_BACKEND, "..", "active_trading.log"))
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 fh.setFormatter(formatter)
 logger.addHandler(fh)
+
+# Institutional Constants
+ASSET = "XAUUSD"
 
 class CTraderBridge:
     def __init__(self, active_strategy_handler=None):
@@ -59,6 +62,9 @@ class CTraderBridge:
         self.latest_bid = None
         self.latest_ask = None
         self.pending_sl_tp = {} # Track pending SL/TP by clientMsgId or logic
+        self.data_cache = {} # TF -> Candles
+        self.data_dir = r"C:\GIA_DATA"
+        os.makedirs(self.data_dir, exist_ok=True)
         
         # Populate IDs
         Protobuf.populate()
@@ -159,7 +165,8 @@ class CTraderBridge:
                 actual_payload = Protobuf.extract(message)
                 if hasattr(actual_payload, 'trader'):
                     self.current_equity = actual_payload.trader.balance / 100.0
-                    print(f"💰 Account Balance Updated: ${self.current_equity}")
+                    # Silenced for clean Dashboard UI
+                    # print(f"💰 Account Balance Updated: ${self.current_equity}")
                     if self.auth_stage == 4:
                         self.auth_stage = 5
                         self.ready_event.set()
@@ -253,7 +260,71 @@ class CTraderBridge:
 
         # Reconcile Response (Positions) (2125)
 
+        # Trendbars Response (2138)
+        elif msg_type == Protobuf._names["ProtoOAGetTrendbarsRes"]:
+            payload = Protobuf.extract(message)
+            tf_map = {1: "M1", 7: "M15", 8: "M30", 9: "H1"}
+            period = payload.period
+            tf_label = tf_map.get(period, "UNKNOWN")
+            
+            # Fallback for different library versions
+            raw_bars = getattr(payload, 'trendbar', getattr(payload, 'trendbars', []))
+            
+            bars = []
+            for bar in raw_bars:
+                # Direct extraction with defaults to avoid errors
+                ts_min = getattr(bar, 'utcTimestampInMinutes', 0)
+                l_raw = getattr(bar, 'low', 0)
+                o_raw = l_raw + getattr(bar, 'deltaOpen', 0)
+                h_raw = l_raw + getattr(bar, 'deltaHigh', 0)
+                c_raw = l_raw + getattr(bar, 'deltaClose', 0)
+                v = getattr(bar, 'volume', 0)
+                
+                if ts_min == 0: continue
+                
+                ts_ms = ts_min * 60 * 1000
+                o, h, l, c = [p / 100000.0 for p in [o_raw, h_raw, l_raw, c_raw]]
+                
+                dt_str = datetime.fromtimestamp(ts_ms/1000.0).strftime('%Y-%m-%d %H:%M:%S')
+                bars.append(f"{dt_str},{o:.2f},{h:.2f},{l:.2f},{c:.2f},{v}")
+            
+            if tf_label != "UNKNOWN":
+                self.data_cache[tf_label] = bars
+                self._save_to_csv(tf_label, bars)
+                print(f"💾 cTrader API: Synced {len(bars)} candles for {tf_label} to disk.")
+
+    def _save_to_csv(self, tf, bars):
+        """Saves bars to the official GIA_DATA directory."""
+        fpath = os.path.join(self.data_dir, f"{ASSET}_{tf}.csv")
+        try:
+            with open(fpath, 'w') as f:
+                f.write("Time,Open,High,Low,Close,Volume\n")
+                f.write("\n".join(bars))
+                f.write("\n")
+        except Exception as e:
+            logger.error(f"Sync Error for {tf}: {str(e)}")
+
     def _update_account_info(self):
+        """Requests latest equity and position state."""
+        if not self.authorized: return
+        self.client.send("ProtoOATraderReq", ctidTraderAccountId=self.account_id)
+        self.client.send("ProtoOAReconcileReq", ctidTraderAccountId=self.account_id)
+
+    def fetch_live_data(self):
+        """Requests M1, M15, M30, H1 history from the server."""
+        if not self.authorized or not self.symbol_id: return
+        
+        # Period Map: M1=1, M15=7, M30=8, H1=9
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - (86400 * 30 * 1000) # 30 days for full indicator parity
+        
+        for p in [1, 7, 8, 9]:
+            self.client.send("ProtoOAGetTrendbarsReq",
+                             ctidTraderAccountId=self.account_id,
+                             symbolId=self.symbol_id,
+                             period=p,
+                             fromTimestamp=start_ms,
+                             toTimestamp=now_ms)
         """Requests latest equity and position state."""
         if not self.authorized: return
         self.client.send("ProtoOATraderReq", ctidTraderAccountId=self.account_id)

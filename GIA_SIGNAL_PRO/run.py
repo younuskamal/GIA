@@ -12,6 +12,17 @@ from GIA_SIGNAL_PRO.config.settings import MIN_CONFIDENCE, DATA_DIR
 from GIA_SIGNAL_PRO.core.engine import GIASignalEngine
 from GIA_SIGNAL_PRO.utils.telegram_notifier import notifier
 
+# --- Institutional Compatibility Bridge ---
+# Required for unpickling models containing legacy MockEncoder references
+class MockEncoder:
+    def inverse_transform(self, idxs):
+        mapping = {0: 'WAIT', 1: 'BUY', 2: 'SELL'}
+        return [mapping.get(i, 'WAIT') for i in idxs]
+
+import __main__
+if not hasattr(__main__, 'MockEncoder'):
+    __main__.MockEncoder = MockEncoder
+
 def main():
     init(autoreset=True)
     print(f"\n{Fore.CYAN}╔════════════════════════════════════════════════════════╗")

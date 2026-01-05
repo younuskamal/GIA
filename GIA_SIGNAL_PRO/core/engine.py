@@ -20,6 +20,7 @@ class GIASignalEngine:
     Optimized for M1 entries with multi-TF verification.
     """
     def __init__(self):
+        self.model_mtime = 0
         self.model_data = self._load()
         self.trainer = GIA_Apex_Distiller()
         self.last_signal_ts = None
@@ -27,11 +28,14 @@ class GIASignalEngine:
 
     def _load(self):
         if os.path.exists(MODEL_PATH):
-            print(f"✅ Intelligence Loaded: {MODEL_PATH}")
-            return joblib.load(MODEL_PATH)
+            mtime = os.path.getmtime(MODEL_PATH)
+            if mtime > self.model_mtime:
+                print(f"✅ Intelligence Loaded/Updated: {MODEL_PATH}")
+                self.model_mtime = mtime
+                return joblib.load(MODEL_PATH)
         else:
             print(f"❌ Model not found at {MODEL_PATH}. Please run training first.")
-        return None
+        return self.model_data if hasattr(self, 'model_data') else None
 
     def _get_latest_data(self):
         # Optimized for M1 scalping with 2024-2025 Institutional Data
@@ -58,6 +62,8 @@ class GIASignalEngine:
         return df1, df5, df15, dfh1
 
     def run_inference(self):
+        # Auto-reload if evolution loop updated the model
+        self.model_data = self._load()
         if not self.model_data: return None
         
         try:
@@ -83,7 +89,13 @@ class GIASignalEngine:
             pred = np.argmax(calibrated_probs) # 0:SKIP, 1:BUY, 2:SELL
             conf = int(calibrated_probs[pred] * 100)
             
+            # DEBUG: Print Probabilities for internal monitoring
+            dec_map = {0: 'SKIP', 1: 'BUY', 2: 'SELL'}
+            print(f"   📊 Confidence Matrix: [SKIP: {calibrated_probs[0]:.2f}] [BUY: {calibrated_probs[1]:.2f}] [SELL: {calibrated_probs[2]:.2f}]")
+            print(f"   🔍 AI Decision: {dec_map[pred]} (Conf: {conf}%)")
+
             # 🦁 PREMIUM SCALPING LOGIC
+
             if pred != 0 and conf >= MIN_CONFIDENCE:
                 # 🛑 Market Hygiene Filters
                 spread_wide = False # Could be integrated if real-time spread data exists

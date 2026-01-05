@@ -29,7 +29,7 @@ class BacktestEngine:
 
     def backtest(self, df, broker_name="FIPER", initial_balance=10000, risk_pct=1.0, 
                  mode=SystemMode.STRATEGY_TEST_MODE, sizing_mode='dynamic', fixed_lot_size=0.01,
-                 external_signals=None):
+                 external_signals=None, execution_latency=0.05): # 50ms latency by default
         """
         Runs a professional simulation.
         
@@ -47,7 +47,8 @@ class BacktestEngine:
         
         # 1. Setup Environment
         broker = BrokerSimulator(broker_name)
-        strategy = StrategyHandler(mode=mode, is_legacy=self.is_legacy)
+        is_predator = "PREDATOR" in self.model_path.upper()
+        strategy = StrategyHandler(mode=mode, is_legacy=self.is_legacy, uhf_mode=is_predator)
         leverage = 500 # Default Gold Leverage
         
         # Ensure necessary columns
@@ -100,7 +101,7 @@ class BacktestEngine:
         equity = initial_balance
         peak_equity = initial_balance
         
-        position = None # { 'type': 'BUY'/'SELL', 'entry_price': float, 'lots': float, 'sl': float, 'tp': float, 'entry_time': date }
+        positions = [] # List of open position dicts
         trades_log = []
         
         equity_curve = [initial_balance]
@@ -110,6 +111,13 @@ class BacktestEngine:
         lows = df['low'].values
         closes = df['close'].values
         atrs = df['atr'].values if 'atr' in df.columns else np.zeros(len(df))
+        
+        # 🧪 Performance Optimization: Pre-extract metadata to NumPy
+        regimes = df['regime_flag'].values if 'regime_flag' in df.columns else np.zeros(len(df))
+        entropies = df['market_entropy'].values if 'market_entropy' in df.columns else np.full(len(df), 0.5)
+        exhaustions = df['exhaustion_index'].values if 'exhaustion_index' in df.columns else np.zeros(len(df))
+        bb_widths = df['bb_width'].values if 'bb_width' in df.columns else np.full(len(df), 0.01)
+
         
         # Cooldown & Risk State
         cooldown_counter = 0
@@ -125,14 +133,13 @@ class BacktestEngine:
             if equity < initial_balance * RiskRules.EQUITY_HARD_STOP_PCT:
                 break # Hard Stop
                 
-            # --- B. Manage Open Position ---
-            if position:
-                # Mark to market (Equity Update)
+            # --- B. Manage Open Positions ---
+            for position in positions[:]:
+                # Mark to market (Equity Update for this position)
                 # Using 'Close' for estimation, but High/Low for stop checks
                 curr_price = closes[i]
                 
                 # --- B. Update MFE/MAE (Maximum Favorable/Adverse Excursion) ---
-                price_diff = closes[i] - position['entry_price']
                 if position['type'] == 'BUY':
                     position['mfe'] = max(position.get('mfe', 0), highs[i] - position['entry_price'])
                     position['mae'] = min(position.get('mae', 0), lows[i] - position['entry_price'])
@@ -140,69 +147,58 @@ class BacktestEngine:
                     position['mfe'] = max(position.get('mfe', 0), position['entry_price'] - lows[i])
                     position['mae'] = min(position.get('mae', 0), position['entry_price'] - highs[i])
                 
-                # --- C. Check for SL/TP hits (Pessimistic Intra-bar Logic) ---
+                # --- Trailing / BE Logic ---
+                curr_atr = atrs[i] if atrs[i] > 0 else 1.0
+                mfe_pips = position.get('mfe', 0)
+                
+                if not position.get('be_active', False) and mfe_pips > (curr_atr * 1.0):
+                    comm_buffer = 0.03
+                    if position['type'] == 'BUY':
+                        position['sl'] = position['entry_price'] + comm_buffer
+                    else:
+                        position['sl'] = position['entry_price'] - comm_buffer
+                    position['be_active'] = True
+                
+                if position.get('be_active', False):
+                    trail_dist = curr_atr * 2.0
+                    if position['type'] == 'BUY':
+                        new_sl = highs[i] - trail_dist
+                        if new_sl > position['sl']: position['sl'] = new_sl
+                    else:
+                        new_sl = lows[i] + trail_dist
+                        if new_sl < position['sl']: position['sl'] = new_sl
+                
+                # --- Check for SL/TP hits ---
                 exit_price = None
                 exit_reason = None
                 spread = broker.get_dynamic_spread() 
                 
                 if position['type'] == 'BUY':
-                    # If both hit in same candle, assume SL (Pessimistic)
                     hit_sl = lows[i] <= position['sl']
                     hit_tp = highs[i] >= position['tp']
-                    
                     if hit_sl and hit_tp:
-                        exit_price = position['sl']
-                        exit_reason = 'SL (Intra-bar Collision)'
+                        exit_price, exit_reason = position['sl'], 'SL (Collision)'
                     elif hit_sl:
-                        exit_price = position['sl']
-                        exit_reason = 'SL'
+                        exit_price, exit_reason = position['sl'], 'SL'
                     elif hit_tp:
-                        exit_price = position['tp']
-                        exit_reason = 'TP'
+                        exit_price, exit_reason = position['tp'], 'TP'
                         
                 elif position['type'] == 'SELL':
                     hit_sl = highs[i] + spread >= position['sl']
                     hit_tp = lows[i] + spread <= position['tp']
-                    
                     if hit_sl and hit_tp:
-                        exit_price = position['sl']
-                        exit_reason = 'SL (Intra-bar Collision)'
+                        exit_price, exit_reason = position['sl'], 'SL (Collision)'
                     elif hit_sl:
-                        exit_price = position['sl']
-                        exit_reason = 'SL'
+                        exit_price, exit_reason = position['sl'], 'SL'
                     elif hit_tp:
-                        exit_price = position['tp']
-                        exit_reason = 'TP'
+                        exit_price, exit_reason = position['tp'], 'TP'
                 
-                # Execute Exit if Triggered
                 if exit_price:
-                    # Calculate Real Exit Cost
-                    cost_info = broker.calculate_cost(position['lots'], exit_price, position['type']) # Reverse? No, calculate_cost is generic
-                    # Wait, calculate_cost is for Entry. Exit is simpler:
-                    # Commission is usually paid round-trip or per side. BrokerProfile is per LOT (standard is round trip or single side?)
-                    # Usually "7 per lot" is Round Trip (RT). So 3.5 per side.
-                    # Let's assume BrokerProfile.commission is RT. So we paid half on entry? Or fully on entry?
-                    # Standard MT4: Comm charged on entry. Swap charged midnight.
-                    # We simulated comm on entry. So exit is just price delta.
+                    cost_info = broker.calculate_cost(position['lots'], exit_price, position['type'])
+                    real_exit_price = cost_info['exec_price']
                     
-                    real_exit_price = cost_info['exec_price'] # Applies Slippage/Spread logic again
-                    
-                    # PnL Calc based on Price
-                    price_delta = 0
-                    if position['type'] == 'BUY':
-                        price_delta = real_exit_price - position['entry_price']
-                    else:
-                        price_delta = position['entry_price'] - real_exit_price
-                    
-                    # Dollar Value ($10 per pip per lot is standard for XAUUSD? No.)
-                    # Gold: 1 lot = 100 oz. $1 move = $100.
-                    # If price_delta is 1.0 (1300 -> 1301), and lots is 1.0, PnL is $100.
-                    # Formula: Delta * Lots * ContractSize(100)
-                    contract_size = 100
-                    pnl = price_delta * position['lots'] * contract_size
-                    
-                    # Apply Swap? (Ignored for now)
-                    
+                    price_delta = (real_exit_price - position['entry_price']) if position['type'] == 'BUY' else (position['entry_price'] - real_exit_price)
+                    pnl = price_delta * position['lots'] * 100
                     pnl_pct = (pnl / balance) * 100 if balance != 0 else 0
                     balance += pnl
                         
@@ -228,7 +224,7 @@ class BacktestEngine:
                     else:
                         consecutive_losses = 0
                         
-                    position = None # Position Closed
+                    positions.remove(position)
                     
             # --- C. New Trade Logic ---
             # Decrement Cooldown
@@ -236,7 +232,7 @@ class BacktestEngine:
                 cooldown_counter -= 1
                 continue
                 
-            if position is None:
+            if len(positions) < RiskRules.MAX_CONCURRENT_TRADES:
                 # --- Circuit Breaker: Drawdown Limit ---
                 current_dd = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0
                 if current_dd > (RiskRules.MAX_TOTAL_DRAWDOWN_PCT / 100.0):
@@ -245,19 +241,20 @@ class BacktestEngine:
                 # Strategy Decision
                 signal = y_pred_labels[i]
                 conf = y_pred_probs[i]
-                
-                # Context
-                atr = atrs[i] if atrs[i] > 0 else 1.0
                 spread = broker.get_dynamic_spread()
+                atr = atrs[i] if atrs[i] > 0 else 1e-6
+                
+                # Context (Vectorized Access)
                 ctx = {
-                    "date": current_date, # Required for Daily Limit
-                    "volatility_ratio": 1.0,
-                    "regime_flag": df.iloc[i].get('regime_flag', 0),
-                    "dist_ema200": df.iloc[i].get('dist_ema200', 0),
-                    "bb_width": df.iloc[i].get('bb_width', 0.01),
+                    "date": current_date, 
+                    "regime_flag": regimes[i],
+                    "market_entropy": entropies[i],
+                    "exhaustion_index": exhaustions[i],
+                    "bb_width": bb_widths[i],
                     "atr": atr,
                     "spread": spread
                 }
+
                 
                 decision = strategy.apply_strategy(signal, conf, ctx)
                 final_sig = decision['signal']
@@ -336,6 +333,16 @@ class BacktestEngine:
                     
                     cost_info = broker.calculate_cost(lots, entry_price, final_sig)
                     real_entry_price = cost_info['exec_price']
+                    
+                    # 🚀 INSTITUTIONAL REALISM: Execution Latency & Slip
+                    # In high volatility (ATR), latency hurts more
+                    vol_impact = (atr / entry_price) * 1000
+                    latency_slip = execution_latency * vol_impact
+                    if final_sig == 'BUY':
+                        real_entry_price += latency_slip
+                    else:
+                        real_entry_price -= latency_slip
+                        
                     total_comm = cost_info['commission']
                     
                     # Deduct Comm immediately (Balance separation)
@@ -351,7 +358,7 @@ class BacktestEngine:
                         sl_price = real_entry_price + sl_dist
                         tp_price = real_entry_price - tp_dist
                         
-                    position = {
+                    new_position = {
                         'type': final_sig,
                         'entry_price': real_entry_price,
                         'lots': lots,
@@ -360,16 +367,15 @@ class BacktestEngine:
                         'confidence': conf,
                         'entry_time': current_date
                     }
+                    positions.append(new_position)
+                    strategy.record_trade_start(current_date)
+
             
             # Update Equity (Floating PnL + Balance)
             floating_pnl = 0
-            if position:
-                delta = 0
-                if position['type'] == 'BUY':
-                    delta = closes[i] - position['entry_price']
-                else:
-                    delta = position['entry_price'] - closes[i]
-                floating_pnl = delta * position['lots'] * 100
+            for pos in positions:
+                delta = (closes[i] - pos['entry_price']) if pos['type'] == 'BUY' else (pos['entry_price'] - closes[i])
+                floating_pnl += delta * pos['lots'] * 100
                 
             equity = balance + floating_pnl
             peak_equity = max(peak_equity, equity)

@@ -32,26 +32,40 @@ class MockEncoder:
         mapping = {0: 'WAIT', 1: 'BUY', 2: 'SELL'}
         return [mapping[i] for i in idxs]
 
+# Inject into __main__ to solve joblib/pickle deserialization issues
+import __main__
+__main__.MockEncoder = MockEncoder
+
 class GoldAnalysisModel:
     def __init__(self, model_path: str = None):
         self.manager = ModelManager()
         self.model_data = None
         self.model_loaded = False
         self.model_path = model_path or os.path.join(BASE_BACKEND, 'models', 'GIA_v14_PRO.pkl')
+        self.last_mtime = 0
         self._load_active_model()
+        is_predator = "PREDATOR" in self.model_path.upper()
         # Initialize Strategy in Advisor Mode (Conservative)
-        self.strategy = StrategyHandler(mode=SystemMode.ADVISOR_MODE)
+        self.strategy = StrategyHandler(mode=SystemMode.ADVISOR_MODE, uhf_mode=is_predator)
         
     def _load_active_model(self):
         if os.path.exists(self.model_path):
             try:
-                self.model_data = joblib.load(self.model_path)
-                self.model_loaded = True
-                print(f"🧠 AI ENGINE ACTIVE: {os.path.basename(self.model_path)}")
+                mtime = os.path.getmtime(self.model_path)
+                if mtime > self.last_mtime:
+                    self.model_data = joblib.load(self.model_path)
+                    self.model_loaded = True
+                    self.last_mtime = mtime
+                    print(f"🧠 AI ENGINE {'LOADED' if self.last_mtime == mtime else 'RELOADED'}: {os.path.basename(self.model_path)}")
             except Exception as e:
-                raise RuntimeError(f"CRITICAL: Failed to load {self.model_path}: {e}")
+                print(f"⚠️ Failed to load model: {e}")
         else:
-            raise FileNotFoundError(f"CRITICAL: AI Model missing at {self.model_path}")
+            print(f"⚠️ AI Model missing at {self.model_path}")
+
+    def analyze(self) -> Dict:
+        """Runs the full analysis cycle with hot-reload support."""
+        self._load_active_model() # Hot-reload if file changed
+        if not self.model_loaded: return {"success": False, "error": "Model not loaded"}
 
     def get_features(self, interval='15m') -> Optional[pd.DataFrame]:
         """Calculates all professional features for live inference, supporting V2/MTF."""
@@ -62,7 +76,7 @@ class GoldAnalysisModel:
         raw_m30 = fetch_real_gold_data(interval='30m')
         raw_h1 = fetch_real_gold_data(interval='1h')
         
-        if any(r is None or len(r) < 200 for r in [raw_m15, raw_m30, raw_h1]):
+        if any(r is None or len(r) < 150 for r in [raw_m15, raw_m30, raw_h1]):
             return None
 
         # 2. Process Base Logic
@@ -126,9 +140,29 @@ class GoldAnalysisModel:
         
         df['coiling'] = df['bb_width'] / (df['bb_width'].rolling(50).mean() + 1e-6)
         df['velocity'] = close.diff(5) / (std20 + 1e-6)
-        df['is_peak'] = ((df['date'].dt.hour >= 7) & (df['date'].dt.hour <= 22)).astype(int)
+        
+        # 🚀 Institutional High-Intelligence Features
+        df['price_acceleration'] = df['velocity'].diff(3)
+        df['liquidity_shock'] = df['volume'] / (df['volume'].rolling(50).mean() + 1e-9)
+        
+        diff_sum = close.diff().abs().rolling(10).sum()
+        range_sum = (df['high'].rolling(10).max() - df['low'].rolling(10).min() + 1e-9)
+        df['market_entropy'] = diff_sum / range_sum
+        
+        ma50 = close.rolling(50).mean()
+        df['exhaustion_index'] = (close - ma50).abs() / (std20 * 2 + 1e-9)
+        
+        df['div_proxy'] = close.pct_change(5) - df['rsi'].pct_change(5)
+        
+        lo100 = close.rolling(100).min()
+        hi100 = close.rolling(100).max()
+        df['structure_strength'] = (close - lo100) / (hi100 - lo100 + 1e-9)
+
+        df['hour'] = df['date'].dt.hour
+        df['is_peak'] = ((df['hour'] >= 7) & (df['hour'] <= 22)).astype(int)
         df['is_peak_hour'] = df['is_peak']
         df['trend_harmony'] = (np.sign(df['macd_norm']) + np.sign(df.get('macd_m30', 0)) + np.sign(df.get('macd_h1', 0))) / 3.0
+
 
         df = df.replace([np.inf, -np.inf], 0).fillna(0)
         return df.tail(10)
@@ -187,7 +221,9 @@ class GoldAnalysisModel:
         # Check mapping for features
         missing = [c for c in feature_cols if c not in latest.columns]
         if missing:
+            print(f"   DEBUG: Feature Columns in Data: {list(latest.columns)}")
             return {"success": False, "error": f"Model requires features missing in latest data: {missing}"}
+
             
         probs = self.model_data['model'].predict_proba(latest[feature_cols])[0]
         confidence = float(np.max(probs))

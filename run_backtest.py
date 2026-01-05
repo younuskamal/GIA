@@ -96,9 +96,11 @@ def print_ascii_chart(values, height=12, width=80, title="Equity Growth"):
 class FeatureFactory:
     @staticmethod
     def construct(df, features_needed):
+        # 🦁 Performance optimization: only compute missing columns
         df = df.copy()
         for f in features_needed:
-            if f in df.columns: continue
+            if f in df.columns: continue 
+
             
             # Momentum
             if f == 'rsi': df['rsi'] = FeatureFactory._rsi(df['close'])
@@ -160,32 +162,40 @@ class FeatureFactory:
                 df['vol_change'] = v.pct_change()
             
             # Candle Morphology
-            elif f == 'body_ratio' or f == 'body_rel':
-                 df[f] = (df['close'] - df['open']).abs() / (df['high'] - df['low'] + 1e-9)
+            elif f in ['body_ratio', 'body_rel']:
+                df[f] = (df['close'] - df['open']).abs() / (df['high'] - df['low'] + 1e-9)
             elif f == 'wick_ratio':
-                 u = (df['high'] - df[['open', 'close']].max(axis=1))
-                 l = (df[['open', 'close']].min(axis=1) - df['low'])
-                 df['wick_ratio'] = u / (l + 1e-9)
-            elif f == 'body_size': df['body_size'] = (df['close'] - df['open']).abs() / (df['close'] + 1e-6)
-            elif f == 'upper_wick': df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['close'] + 1e-6)
-            elif f == 'lower_wick': df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (df['close'] + 1e-6)
+                up = (df['high'] - df[['open', 'close']].max(axis=1))
+                lo = (df[['open', 'close']].min(axis=1) - df['low'])
+                df['wick_ratio'] = up / (lo + 1e-9)
+            elif f == 'body_size': 
+                df['body_size'] = (df['close'] - df['open']).abs() / (df['close'] + 1e-9)
+            elif f == 'upper_wick': 
+                df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['close'] + 1e-9)
+            elif f == 'lower_wick': 
+                df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (df['close'] + 1e-9)
+
             
             # Special & Structural
+            elif f == 'structure_strength':
+                lo = df['close'].rolling(100).min()
+                hi = df['close'].rolling(100).max()
+                df['structure_strength'] = (df['close'] - lo) / (hi - lo + 1e-9)
             elif f == 'regime_flag':
                 re = MarketRegimeEngine()
                 df = re.classify(df)
             elif f == 'atr_norm' or f == 'atr_pct':
-                df[f] = FeatureFactory._atr(df, 14) / (df['close'] + 1e-6)
+                df[f] = FeatureFactory._atr(df, 14) / (df['close'] + 1e-9)
             elif f == 'sqz_gate':
                 ma = df['close'].rolling(100).mean()
                 std = df['close'].rolling(100).std()
-                bw = (4 * std) / (ma + 1e-6)
+                bw = (4 * std) / (ma + 1e-9)
                 df['sqz_gate'] = (bw > bw.rolling(100).mean()).astype(int)
             elif f == 'vol_20':
                 df['vol_20'] = df['close'].rolling(20).std()
             elif f == 'vol_regime':
                 v20 = df['close'].rolling(20).std()
-                df['vol_regime'] = (v20 / (v20.rolling(200).mean() + 1e-6)).fillna(1.0)
+                df['vol_regime'] = (v20 / (v20.rolling(200).mean() + 1e-9)).fillna(1.0)
             elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour', 'session_london', 'session_ny', 'is_high_liquidity']:
                 hour = df['date'].dt.hour
                 df['is_london'] = ((hour >= 8) & (hour <= 16)).astype(int)
@@ -196,8 +206,17 @@ class FeatureFactory:
                 df['is_peak_hour'] = df['is_peak']
                 df['is_high_liquidity'] = ((hour >= 8) & (hour <= 11)) | ((hour >= 13) & (hour <= 16))
             elif f == 'velocity':
-                v20 = df['close'].rolling(20).std()
-                df['velocity'] = df['close'].diff(5) / (v20 + 1e-9)
+                # Institutional Sync: GIA_SIGNAL_PRO uses 1-period diff, others use 5-period normalized
+                # We auto-detect based on accompanying features
+                if 'acceleration' in features_needed:
+                    df['velocity'] = df['close'].diff(1) / (df['close'].shift(1) + 1e-9)
+                else:
+                    v20 = df['close'].rolling(20).std()
+                    df['velocity'] = df['close'].diff(5) / (v20 + 1e-9)
+            elif f == 'acceleration':
+                # Force 1-period velocity for acceleration derivation
+                vel_raw = df['close'].diff(1) / (df['close'].shift(1) + 1e-9)
+                df['acceleration'] = vel_raw.diff(1)
             elif f == 'coiling':
                 ma = df['close'].rolling(20).mean()
                 std = df['close'].rolling(20).std()
@@ -207,10 +226,11 @@ class FeatureFactory:
                 ma = df['close'].rolling(20).mean()
                 df['price_dist_bb'] = (df['close'] - ma) / (ma + 1e-6)
             elif f == 'div_proxy':
-                pv = df['close'].diff(5) / (df['close'].shift(5) + 1e-6)
+                pv = df['close'].diff(5) / (df['close'].shift(5) + 1e-9)
                 rv = FeatureFactory._rsi(df['close']).diff(5) / 100.0
                 df['div_proxy'] = pv - rv
             elif f == 'ribbon_align':
+
                 align = 0
                 for s in [9, 21, 50, 100, 200]:
                     ema = df['close'].ewm(span=s, adjust=False).mean()
@@ -219,7 +239,7 @@ class FeatureFactory:
             elif f == 'trend_harmony':
                 e12 = df['close'].ewm(span=12, adjust=False).mean()
                 e26 = df['close'].ewm(span=26, adjust=False).mean()
-                m_norm = (e12 - e26) / (df['close'] + 1e-6)
+                m_norm = (e12 - e26) / (df['close'] + 1e-9)
                 df['trend_harmony'] = (
                     np.sign(m_norm) + 
                     np.sign(df.get('macd_m30', 0)) + 
@@ -234,6 +254,37 @@ class FeatureFactory:
                 df['stoch_k'] = 100 * (df['close'] - low_14) / (high_14 - low_14 + 1e-6)
             elif f == 'news_sentiment' or f == 'news_impact_score':
                 df[f] = 0.0
+            elif f == 'price_acceleration':
+                v20 = df['close'].rolling(20).std()
+                vel = df['close'].diff(5) / (v20 + 1e-9)
+                df['price_acceleration'] = vel.diff(3)
+            elif f == 'liquidity_shock':
+                avg_vol = df['volume'].rolling(20).mean()
+                df['liquidity_shock'] = df['volume'] / (avg_vol + 1e-9)
+            elif f == 'market_entropy':
+                diff_sum = df['close'].diff().abs().rolling(10).sum()
+                range_sum = (df['high'].rolling(10).max() - df['low'].rolling(10).min() + 1e-9)
+                df['market_entropy'] = diff_sum / range_sum
+            elif f == 'candle_strength':
+                body = (df['close'] - df['open']).abs()
+                df['candle_strength'] = body / (df['high'] - df['low'] + 1e-9)
+            elif f == 'dist_ma9':
+                ma9 = df['close'].rolling(9).mean()
+                df['dist_ma9'] = (df['close'] - ma9) / (ma9 + 1e-9)
+            elif f == 'vol_momentum':
+                vol_delta = df['volume'] * np.sign(df['close'] - df['open'])
+                df['vol_momentum'] = vol_delta.rolling(5).mean() / (df['volume'].rolling(20).mean() + 1e-9)
+            elif '_lag' in f:
+                parts = f.split('_lag')
+                base_feat = parts[0]
+                lag_val = int(parts[1])
+                # Recurse to ensure base feature exists
+                df = FeatureFactory.construct(df, [base_feat])
+                df[f] = df[base_feat].shift(lag_val)
+            elif f == 'exhaustion_index':
+                ma50 = df['close'].rolling(50).mean()
+                v20 = df['close'].rolling(20).std()
+                df['exhaustion_index'] = (df['close'] - ma50).abs() / (v20 * 2 + 1e-9)
 
         return df.dropna()
 
@@ -848,9 +899,30 @@ class BattleArena:
         return res
 
     def start(self, cli_args=None):
+        self.synthetic = getattr(cli_args, 'synthetic', False) if cli_args else False
+        self.asset = getattr(cli_args, 'asset', 'XAUUSD').upper() if cli_args else 'XAUUSD'
         print_banner()
         
-        if cli_args and (cli_args.model or cli_args.compare):
+        is_cli = cli_args and (cli_args.model or cli_args.compare)
+        
+        if not is_cli:
+            print(f" {Fore.YELLOW}STEP 0: SELECT MARKET ENVIRONMENT{Style.RESET_ALL}")
+            print(f"  [{Fore.GREEN}1{Style.RESET_ALL}] Institutional (Real History)")
+            print(f"  [{Fore.GREEN}2{Style.RESET_ALL}] Synthetic Stress Gauntlet (Fake Data)")
+            env_choice = input(f"\n {Fore.WHITE}Select Environment [Default 1] > {Style.RESET_ALL}").strip() or "1"
+            if env_choice == "2":
+                self.synthetic = True
+                # Automatically pivot to synthetic folder if using default
+                if self.data_dir == self.DEFAULT_DATA_DIR:
+                    self.data_dir = os.path.join(os.getcwd(), 'backend', 'hestory')
+            else:
+                self.synthetic = False
+
+        choice = None
+        
+        is_cli = cli_args and (cli_args.model or cli_args.compare)
+        if is_cli:
+            choice = 'A' if cli_args.compare else 'CLI'
             if cli_args.compare:
                 targets = sorted([m for m in os.listdir(self.models_dir) if m.endswith('.pkl')])
                 if os.path.exists(self.pro_models_dir):
@@ -869,23 +941,64 @@ class BattleArena:
             fixed_lot = cli_args.lots
             start_y = cli_args.from_year
             end_y = cli_args.to_year
+            latency = getattr(cli_args, 'latency', 0.1)
         else:
             # --- PROFESSIONAL DASHBOARD ---
-            print(f"\n {Fore.YELLOW}STEP 1: SELECT YOUR AI MODEL{Style.RESET_ALL}")
             models_main = sorted([f for f in os.listdir(self.models_dir) if f.endswith('.pkl')])
             models_pro = sorted([f for f in os.listdir(self.pro_models_dir) if f.endswith('.pkl')]) if os.path.exists(self.pro_models_dir) else []
             
             all_paths = {m: os.path.join(self.models_dir, m) for m in models_main}
             for m in models_pro: all_paths[m] = os.path.join(self.pro_models_dir, m)
-            
             all_models = sorted(list(all_paths.keys()))
-            for i, m in enumerate(all_models):
-                label = "[PRO]" if m in models_pro else "[CORE]"
-                print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {Fore.LIGHTBLACK_EX}{label}{Style.RESET_ALL}")
+
+            # --- MODEL INTELLIGENCE REGISTRY ---
+            MODEL_NAVIGATOR = {
+                "GIA_SIGNAL_PRO.pkl": {"tf": "M1", "broker": "IC MARKETS", "risk": 0.5, "latency": 0.02, "desc": "High-Frequency Scalper"},
+                "GIA_v2_PRO.pkl": {"tf": "M15", "broker": "FIPER", "risk": 1.0, "latency": 0.05, "desc": "Institutional Hybrid (Elite)"},
+                "GIA_v14_PRO.pkl": {"tf": "H1", "broker": "PEPPERSTONE", "risk": 1.5, "latency": 0.15, "desc": "Strategic Trend Hunter"},
+                "GIA_v1.1_PRO.pkl": {"tf": "M15", "broker": "IC MARKETS", "risk": 1.0, "latency": 0.1, "desc": "Standard Balanced Bot"},
+                "GIA_v2_FLASH.pkl": {"tf": "M15", "broker": "IC MARKETS", "risk": 1.2, "latency": 0.05, "desc": "High-Velocity Engine"}
+            }
+
+            print(f"\n {Fore.YELLOW}STEP 1: SELECT YOUR AI MODEL{Style.RESET_ALL}")
+            for i, m in enumerate(all_models): 
+                tag = "[PRO]" if m in models_pro else "[CORE]"
+                intelligence = MODEL_NAVIGATOR.get(m, {"tf": "M15", "desc": "Universal Mode"})
+                print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:22} {tag} | {intelligence['tf']} | {intelligence['desc']}")
             print(f"  [{Fore.GREEN}A{Style.RESET_ALL}] COMPARE ALL MODELS")
             
             choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
             targets = all_models if choice == 'A' else [all_models[int(choice)-1]] if choice.isdigit() else [all_models[0]]
+
+            print(f"\n {Fore.YELLOW}STEP 1.5: SELECT ASSET{Style.RESET_ALL}")
+            print(f"  [{Fore.GREEN}1{Style.RESET_ALL}] XAUUSD    [{Fore.GREEN}2{Style.RESET_ALL}] BTCUSD")
+            print(f"  [{Fore.GREEN}3{Style.RESET_ALL}] USDJPY    [{Fore.GREEN}4{Style.RESET_ALL}] GBPJPY")
+            print(f"  [{Fore.GREEN}5{Style.RESET_ALL}] XAGUSD")
+            a_choice = input(f"\n {Fore.WHITE}Select Asset [Enter for {self.asset}] > {Style.RESET_ALL}").strip()
+            asset_map = {"1":"XAUUSD", "2":"BTCUSD", "3":"USDJPY", "4":"GBPJPY", "5":"XAGUSD"}
+            if a_choice in asset_map: self.asset = asset_map[a_choice]
+
+
+            # AUTO-CONFIG (If single model selected)
+            auto_config = (choice != 'A')
+            if auto_config:
+                m_intel = MODEL_NAVIGATOR.get(targets[0], {"tf": "M15", "broker": "IC MARKETS", "risk": 1.0, "latency": 0.1})
+                print(f"\n {Fore.CYAN}💡 AUTO-DETECTED REQUIREMENTS for {targets[0]}:{Style.RESET_ALL}")
+                print(f"   Native TF: {m_intel['tf']} | Ideal Broker: {m_intel['broker']} | Balanced Risk: {m_intel['risk']}%")
+                
+                use_auto = input(f"\n {Fore.WHITE}Apply Institutional Auto-Config? (Y/n) > {Style.RESET_ALL}").strip().lower() != 'n'
+                if use_auto:
+                    tf = m_intel['tf']
+                    broker = m_intel['broker']
+                    risk = m_intel['risk']
+                    latency = m_intel['latency']
+                    sizing_mode = "dynamic"
+                    capital = 500
+                    start_y, end_y = 2024, datetime.now().year
+                    print(f"   {Fore.GREEN}✔ Settings Applied.{Style.RESET_ALL}")
+                else:
+                    auto_config = False # Force manual if user says no
+
 
             print(f"\n {Fore.YELLOW}STEP 2: SELECT EXECUTION TIMEFRAME{Style.RESET_ALL}")
             print(f"  [{Fore.GREEN}0{Style.RESET_ALL}] M1 (Scalping)   [{Fore.GREEN}1{Style.RESET_ALL}] M15 (Tactical)  [{Fore.GREEN}2{Style.RESET_ALL}] M30 (Balanced)  [{Fore.GREEN}3{Style.RESET_ALL}] H1 (Strategic)")
@@ -904,23 +1017,58 @@ class BattleArena:
             fixed_lot = float(input(f"  {Fore.WHITE}Fixed Lot Size [0.01] > {Style.RESET_ALL}") or 0.01) if sizing_mode == "fixed" else 0.01
             capital = float(input(f"  {Fore.WHITE}STEP 5: CAPITAL > {Style.RESET_ALL}") or 1000)
             risk = float(input(f"  {Fore.WHITE}STEP 6: RISK % > {Style.RESET_ALL}") or 1.0) if sizing_mode == "dynamic" else 1.0
-            start_y, end_y = 2024, 2025
+            
+            print(f"\n {Fore.YELLOW}STEP 7: YEAR RANGE (2010-2025){Style.RESET_ALL}")
+            current_yr = datetime.now().year
+            start_y = int(input(f"  {Fore.WHITE}Start Year [2024] > {Style.RESET_ALL}") or 2024)
+            end_y = int(input(f"  {Fore.WHITE}End Year [{current_yr}] > {Style.RESET_ALL}") or current_yr)
+            
+            print(f"\n {Fore.YELLOW}STEP 8: INSTITUTIONAL LATENCY (Seconds){Style.RESET_ALL}")
+            latency = float(input(f"  {Fore.WHITE}Execution Delay [0.1s] > {Style.RESET_ALL}") or 0.1)
 
         # --- EXECUTION LOOP ---
         final_table = []
         comparison_data = []
         base_tf = tf
+        
+        # 🧪 Turbo Cache: Avoid re-calculating common features
+        TIMEFRAME_CACHE = {} 
+
 
         for m_name in targets:
             print_separator("-", color=Fore.LIGHTBLACK_EX)
-            current_tf = "M1" if "SIGNAL_PRO" in m_name else base_tf
+            
+            # 🦁 Institutional Smart Dispatcher:
+            # If comparing, automatically use each model's native timeframe
+            if choice == 'A':
+                # Dynamically fetch intel even if model wasn't in original registry
+                temp_intel = {
+                    "GIA_SIGNAL_PRO.pkl": "M1",
+                    "GIA_v2_PRO.pkl": "M15",
+                    "GIA_v14_PRO.pkl": "H1"
+                }
+                current_tf = temp_intel.get(m_name, base_tf)
+            else:
+                current_tf = tf
+
             print(f"🦁 {Fore.WHITE}ENGINEERING: {Fore.YELLOW}{m_name}{Style.RESET_ALL} | {Fore.CYAN}{current_tf}{Style.RESET_ALL} [NATIVE]")
+
+
             
             try:
-                pro_path = os.path.join(self.pro_models_dir, m_name)
-                core_path = os.path.join(self.models_dir, m_name)
-                path = pro_path if os.path.exists(pro_path) else core_path
+                # 🛡️ Path Logic: Filename vs Path
+                if os.path.isabs(m_name) or ("/" in m_name or "\\" in m_name):
+                    path = m_name if os.path.exists(m_name) else os.path.join(self.base_dir, m_name)
+                    m_name = os.path.basename(m_name) # Strip for logging
+                else:
+                    pro_path = os.path.join(self.pro_models_dir, m_name)
+                    core_path = os.path.join(self.models_dir, m_name)
+                    path = pro_path if os.path.exists(pro_path) else core_path
                 
+                if not os.path.exists(path):
+                    print(f"   {Fore.RED}❌ ERROR: Model not found at {path}{Style.RESET_ALL}")
+                    continue
+
                 m_data = joblib.load(path)
                 req_feats = m_data.get('feature_columns', m_data.get('features', []))
                 needs_mtf = any(('_h1' in f or '_m15' in f or '_m5' in f or '_m30' in f) for f in req_feats)
@@ -933,36 +1081,57 @@ class BattleArena:
                     print(f"   {Fore.YELLOW}⚠️ No data found for specified years {start_y}-{end_y}. (Year range in file: {df['date'].min() if not df.empty else 'N/A'}){Style.RESET_ALL}")
                     continue
                 
-                print(f"   🔍 Constructing Features for {m_name}...")
-                df_proc = FeatureFactory.construct(df, req_feats)
-                df_proc = df_proc.dropna(subset=[f for f in req_feats if f in df_proc.columns])
+                # 🧠 Turbo-Feature Engineering
+                if current_tf not in TIMEFRAME_CACHE:
+                    TIMEFRAME_CACHE[current_tf] = df.copy()
                 
-                if df_proc.empty:
-                    print(f"   {Fore.RED}❌ ERROR: Processed data is empty. Check if all required features {req_feats[:5]}... exist.{Style.RESET_ALL}")
-                    continue
+                print(f"   🔍 Constructing Features for {m_name}...")
+                # Re-use cached features and only add new ones
+                TIMEFRAME_CACHE[current_tf] = FeatureFactory.construct(TIMEFRAME_CACHE[current_tf], req_feats)
+                df_proc = TIMEFRAME_CACHE[current_tf].dropna(subset=[f for f in req_feats if f in TIMEFRAME_CACHE[current_tf].columns])
+
                 
                 engine = BacktestEngine(model_path=path, is_legacy="v14" in m_name)
                 engine.load_model()
                 
-                res = engine.backtest(df_proc, broker_name=broker, initial_balance=capital, risk_pct=risk, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot)
+                # 🦁 Smart Dispatcher: Respect each model's native physics if comparing
+                current_broker = broker
+                current_latency = latency
+                if choice == 'A' and m_name in MODEL_NAVIGATOR:
+                    intel = MODEL_NAVIGATOR[m_name]
+                    current_broker = intel.get('broker', broker)
+                    current_latency = intel.get('latency', latency)
+
+                res = engine.backtest(df_proc, broker_name=current_broker, initial_balance=capital, risk_pct=risk, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot, execution_latency=current_latency)
+                
                 if "error" in res:
                     print(f"   {Fore.RED}❌ Simulation Error: {res['error']}{Style.RESET_ALL}")
+                    if "diagnostic" in res:
+                        reason_summary = ", ".join([f"{k}:{v}" for k,v in res['diagnostic']['reasons'].items()])
+                        print(f"     ↳ {Fore.LIGHTBLACK_EX}Diagnostic: {reason_summary}{Style.RESET_ALL}")
                     continue
+
+
 
                 res = self._calculate_extended_stats(res)
                 
-                # Monte Carlo Stress
-                mc_pnl = []
-                for _ in range(3):
-                    rmc = engine.backtest(df_proc, broker_name=broker, risk_pct=risk, initial_balance=capital, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot)
-                    if "error" not in rmc: mc_pnl.append(rmc['net_profit_pct'])
-                survival = (len([p for p in mc_pnl if p > 0]) / len(mc_pnl)) * 100 if mc_pnl else 0
+                # 🚀 Turbo Monte Carlo (Parallel Processing)
+                print(f"   🎲 {Fore.MAGENTA}Running Parallel Stress Test...{Style.RESET_ALL}")
+                from joblib import Parallel, delayed
+                
+                def run_single_mc():
+                    rmc = engine.backtest(df_proc, broker_name=broker, risk_pct=risk, initial_balance=capital, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot, execution_latency=latency)
+                    return rmc.get('net_profit_pct', -100) if "error" not in rmc else -100
+
+                mc_results = Parallel(n_jobs=-1, prefer="threads")(delayed(run_single_mc)() for _ in range(5))
+                survival = (len([p for p in mc_results if p > 0]) / len(mc_results)) * 100 if mc_results else 0
+
                 
                 params = {"tf": current_tf, "broker": broker, "start": start_y, "end": end_y, "risk": risk if sizing_mode == 'dynamic' else f"FIXED {fixed_lot}", "mode": sizing_mode}
                 save_path = ExportManager.save(m_name, res, survival, params)
                 
                 print_ascii_chart(res['equity_curve'], title=f"GIA Elite Bench: {m_name}")
-                print(f" {Fore.WHITE}Trades: {Fore.GREEN}{res['win_count']}W {Fore.RED}{res['loss_count']}L {Fore.WHITE}| ROI: {res['net_profit_pct']:.2f}% | Surv: {survival:.1f}%")
+                print(f" {Fore.WHITE}Trades: {Fore.GREEN}{res['win_count']}W {Fore.RED}{res['loss_count']}L {Fore.WHITE}| ROI: {res['net_profit_pct']:.2f}% | Surv (Monte Carlo): {survival:.1f}%")
                 
                 final_table.append({"Model": m_name, "PF": res['profit_factor'], "DD": res['max_drawdown'], "ROI%": res['net_profit_pct'], "Surv%": survival})
                 comparison_data.append({
@@ -987,31 +1156,45 @@ class BattleArena:
         key = f"{primary_tf}_{'MTF' if needs_multi else 'STF'}"
         if key in self.cache: return self.cache[key]
         
-        df_p = self._read_csv(f'XAUUSD_{primary_tf}.csv')
+        suffix = "_SYNTH" if getattr(self, 'synthetic', False) else ""
+        asset_name = getattr(self, 'asset', 'XAUUSD')
+        df_p = self._read_csv(f'{asset_name}_{primary_tf}{suffix}.csv')
         
         if needs_multi:
-            # Enhanced Context Mapping: Strictly use M1 for M5 synthesis
-            contexts = [('m5', 'XAUUSD_M1.csv'), ('m15', 'XAUUSD_M15.csv'), ('m30', 'XAUUSD_M30.csv'), ('h1', 'XAUUSD_H1.csv')]
+            # Enhanced Context Mapping: Fixed Order for Institutional Physics
+            # We must load specific TFs that v2_PRO expects
+            contexts = [('m15', 'XAUUSD_M15.csv'), ('m30', 'XAUUSD_M30.csv'), ('h1', 'XAUUSD_H1.csv')]
             merged = df_p.sort_values('date')
+            
             for suffix, filename in contexts:
+                if suffix.upper() == primary_tf.upper(): continue # Skip self
                 try:
+                    data_suffix = "_SYNTH" if getattr(self, 'synthetic', False) else ""
+                    asset_name = getattr(self, 'asset', 'XAUUSD')
+                    filename = f"{asset_name}_{suffix.upper()}{data_suffix}.csv"
                     target_path = os.path.join(self.data_dir, filename)
                     if not os.path.exists(target_path): continue
                     
                     df_sec = self._read_csv(filename)
-                    if suffix == 'm5' and 'M1.csv' in filename:
-                        # Resample M1 to M5 context
-                        df_sec = df_sec.set_index('date').resample('5min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna().reset_index()
-                    
                     eng_sec = self._engineer_secondary(df_sec, suffix)
                     merged = pd.merge_asof(merged, eng_sec.sort_values('date'), on='date', direction='backward')
                 except Exception as e:
                     print(f"   {Fore.RED}⚠️ Error merging context {suffix}: {e}{Style.RESET_ALL}")
             
-            # Quality Guard: Fill minor gaps to prevent total data loss
+            # Additional M5 context synthesis from M1 (for SIGNAL_PRO)
+            try:
+                data_suffix = "_SYNTH" if getattr(self, 'synthetic', False) else ""
+                asset_name = getattr(self, 'asset', 'XAUUSD')
+                m1_name = f"{asset_name}_M1{data_suffix}.csv"
+                m1_path = os.path.join(self.data_dir, m1_name)
+                if os.path.exists(m1_path):
+                    df_m1 = self._read_csv(m1_name)
+                    df_m5 = df_m1.set_index('date').resample('5min').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna().reset_index()
+                    eng_m5 = self._engineer_secondary(df_m5, 'm5')
+                    merged = pd.merge_asof(merged, eng_m5.sort_values('date'), on='date', direction='backward')
+            except: pass
+
             res_df = merged.ffill().bfill()
-            if len(res_df) < len(df_p) * 0.5:
-                print(f"   {Fore.RED}⚠️ Severe data loss during merge! Original: {len(df_p)}, Merged: {len(res_df)}{Style.RESET_ALL}")
             self.cache[key] = res_df
         else:
             self.cache[key] = df_p
@@ -1021,38 +1204,85 @@ class BattleArena:
     def _read_csv(self, name):
         df = pd.read_csv(os.path.join(self.data_dir, name))
         df.columns = [c.lower() for c in df.columns]
-        df['date'] = pd.to_datetime(df['time'], format='%m/%d/%Y %I:%M:%S %p' if '/' in str(df['time'].iloc[0]) else None)
-        return df
+        # Institutional Date Parsing (mixed formats)
+        df['date'] = pd.to_datetime(df['time'], format='mixed', dayfirst=False).dt.tz_localize(None)
+        return df.sort_values('date')
 
     def _engineer_secondary(self, df, suffix):
         df = df.copy()
         df[f'rsi_{suffix}'] = FeatureFactory._rsi(df['close'])
+        
         e12 = df['close'].ewm(span=12, adjust=False).mean()
         e26 = df['close'].ewm(span=26, adjust=False).mean()
         df[f'macd_{suffix}'] = (e12 - e26) / (df['close'] + 1e-9)
+        
         ma = df['close'].rolling(20).mean()
         std = df['close'].rolling(20).std()
         df[f'bb_width_{suffix}'] = (4 * std) / (ma + 1e-9)
-        df[f'bbw_{suffix}'] = df[f'bb_width_{suffix}']
-        # 🧪 Critical features for advanced models (GIA_SIGNAL_PRO)
-        df[f'vol_{suffix}'] = df['close'].pct_change().rolling(20).std()
-        df[f'trend_{suffix}'] = np.sign(df['close'].diff(5))
         
-        # FIX: Ensure 'date' is present but NOT duplicated in the list
-        cols_to_keep = ['date'] + [c for c in df.columns if c.endswith(suffix)]
-        # Remove duplicates while preserving order
+        # Super Trader specific MTF indicators
+        if suffix == 'h1':
+            ema200 = df['close'].ewm(span=200, adjust=False).mean()
+            df['ema_200_dist_h1'] = (df['close'] - ema200) / (df['close'] + 1e-9)
+            df['mom_h1'] = df['close'].pct_change(4)
+            df['trend_h1'] = np.where(df['close'] > ema200, 1, -1)
+        
+        df[f'vol_{suffix}'] = df['close'].pct_change().rolling(20).std()
+        df[f'trend_{suffix}'] = np.where(df['close'] > ma, 1, -1)
+        
+        cols_to_keep = ['date'] + [c for c in df.columns if c.endswith(suffix) or c.endswith('_h1')]
+        # Unique columns only
         seen = set()
         clean_cols = [x for x in cols_to_keep if not (x in seen or seen.add(x))]
         return df[clean_cols]
 
-    def _print_scoreboard(self, scores):
-        print("\n" + Fore.YELLOW + "="*80)
-        print(f"{'🏆 GIA PRO BATTLEGROUND LEADERBOARD':^80}")
-        print("="*80 + Style.RESET_ALL)
-        print(f"{Fore.CYAN}{'Model Name':<25} | {'PF':<8} | {'MDD%':<8} | {'ROI%':<10} | {'Surv%':<8}")
-        for s in sorted(scores, key=lambda x: x['PF'], reverse=True):
-            print(f"{Fore.WHITE}{s['Model']:<25}{Style.RESET_ALL} | {s['PF']:<8.2f} | {s['DD']:<8.2f} | {s['ROI%']:<10.2f} | {s['Surv%']:<8.1f}")
-        print(Fore.YELLOW + "="*80 + Style.RESET_ALL + "\n")
+    def _print_scoreboard(self, results):
+        if not results: return
+        
+        print("\n" + Fore.CYAN + "═"*100)
+        print(f"{'🏆 GIA INSTITUTIONAL SELECTION INTELLIGENCE':^100}")
+        print("═"*100 + Style.RESET_ALL)
+        
+        # Calculate Intelligence Scores
+        # Score = (ROI/100 * PF) / (Drawdown + 1) * (Survival/100)
+        for r in results:
+            dd_penalty = max(1, r['DD'])
+            r['iq_score'] = (abs(r['ROI%'])/100 * r['PF']) / dd_penalty * (r['Surv%']/100)
+            
+            # Labeling based on Institutional Standards
+            if r['Surv%'] >= 90 and r['DD'] < 15: r['tag'] = "💎 DIAMOND (Live Ready)"
+            elif r['Surv%'] >= 80: r['tag'] = "🛡️ RESILIENT"
+            elif r['Surv%'] >= 60: r['tag'] = "🔥 AGGRESSIVE"
+            else: r['tag'] = "⚠️ HIGH RISK"
+
+        # Sort by IQ Score
+        ranked = sorted(results, key=lambda x: x['iq_score'], reverse=True)
+        
+        headers = f"{'RANK':<5} {'MODEL NAME':<25} {'ROI%':<12} {'PF':<8} {'DD%':<8} {'SURV%':<8} {'TAG':<20}"
+        print(Fore.YELLOW + headers + Style.RESET_ALL)
+        print("-" * 100)
+        
+        for i, r in enumerate(ranked):
+            color = Fore.GREEN if i == 0 else Fore.WHITE
+            if r['ROI%'] < 0: color = Fore.RED
+            
+            print(f"{color}{i+1:<5} {r['Model']:<25} {r['ROI%']:>10.1f}% {r['PF']:>7.2f} {r['DD']:>7.1f}% {r['Surv%']:>7.1f}%   {r['tag']}{Style.RESET_ALL}")
+        
+        print("-" * 100)
+        winner = ranked[0]
+        print(f"\n{Fore.CYAN}🦁 GIA RECOMMENDATION:{Style.RESET_ALL}")
+        print(f" Based on current market physics, {Fore.YELLOW}{winner['Model']}{Style.RESET_ALL} is the superior choice.")
+        print(f" It shows the best balance of {Fore.GREEN}Resilience ({winner['Surv%']}% survivor){Style.RESET_ALL} and {Fore.GREEN}Efficiency (PF {winner['PF']}){Style.RESET_ALL}.")
+        
+        if winner['DD'] > 20:
+            print(f"{Fore.RED}⚠️ WARNING: High drawdown detected. Recommend Risk 0.5% for live trading.{Style.RESET_ALL}")
+        
+        # Smart advice for small accounts
+        best_survivor = max(results, key=lambda x: x['Surv%'])
+        if best_survivor['Model'] != winner['Model']:
+            print(f"{Fore.MAGENTA}💡 SMALL ACCOUNT TIP:{Style.RESET_ALL} If starting with very low capital, {Fore.WHITE}{best_survivor['Model']}{Style.RESET_ALL} has the highest Survival Rate ({best_survivor['Surv%']}%).")
+            
+        print("═"*100 + "\n")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -1066,6 +1296,10 @@ if __name__ == "__main__":
     parser.add_argument('--mode', type=str, default='dynamic')
     parser.add_argument('--lots', type=float, default=0.01)
     parser.add_argument('--tf', type=str, default='M15')
+    parser.add_argument('--latency', type=float, default=0.1)
+    parser.add_argument('--synthetic', action='store_true', help='Use synthetic _SYNTH data files')
+    parser.add_argument('--data_dir', type=str, help='Path to data directory')
+    parser.add_argument('--asset', type=str, default='XAUUSD', help='Asset name (e.g., BTCUSD)')
     args = parser.parse_args()
-    BattleArena().start(args)
+    BattleArena(data_dir=args.data_dir).start(args)
 

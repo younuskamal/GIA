@@ -64,18 +64,9 @@ class CTraderBridge:
         self.pending_sl_tp = {} # Track pending SL/TP by clientMsgId or logic
         self.data_cache = {} # TF -> Candles
         
-        # 🦁 Cross-Platform Path Mapping
+        # 🦁 Project-Centric Path Mapping
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        local_data = os.path.abspath(os.path.join(base_dir, "..", "..", 'data'))
-        
-        if os.name == 'nt': # Windows
-            self.data_dir = r"C:\GIA_DATA"
-        else: # Linux
-            self.data_dir = "/var/gia_data"
-
-        # Fallback to local 'data' if global missing
-        if not os.path.exists(self.data_dir):
-            self.data_dir = local_data
+        self.data_dir = os.path.abspath(os.path.join(base_dir, "..", "..", 'data'))
             
         os.makedirs(self.data_dir, exist_ok=True)
         

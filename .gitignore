@@ -23,12 +23,10 @@ wheels/
 .installed.cfg
 *.egg
 
-# 🦁 GIA Models (Proprietary - Do not upload)
-backend/models/*.pkl
-backend/models/*.h5
-backend/models/*.json
-*.pkl
-*.h5
+# 🦁 GIA Models (Proprietary - ALLOWED for server parity)
+!backend/models/*.pkl
+!GIA_SIGNAL_PRO/models/*.pkl
+!*.pkl
 
 # 🔐 Sensitive Info
 config/secrets.py

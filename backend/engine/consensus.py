@@ -145,6 +145,7 @@ class TripleConsensusModel:
         # 3. Full Engineering Sync
         df = self._engineer_full_features(df_m15, df_m30, df_h1)
         latest = df.tail(1)
+        regime_flag = int(latest['regime_flag'].iloc[-1]) if 'regime_flag' in latest.columns else 0
 
         # 4. Get Signals from all 3
         # v14 (Risk Governor)
@@ -213,6 +214,9 @@ class TripleConsensusModel:
             "confidence": final_conf,
             "sizing_multiplier": sizing,
             "atr": df['atr'].iloc[-1],
+            "regime_flag": regime_flag,
+            "market_entropy": float(latest['market_entropy'].iloc[-1]) if 'market_entropy' in latest.columns else 0.5,
+            "exhaustion_index": float(latest['exhaustion_index'].iloc[-1]) if 'exhaustion_index' in latest.columns else 0.0,
             "explanation": explanation,
             "brains": {
                 "risk": "BUY" if p14==1 else "SELL" if p14==2 else "WAIT",

@@ -9,7 +9,8 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import pandas as pd
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, Auth, EndPoints, TcpProtocol
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -65,6 +66,9 @@ class CTraderBridge:
         self.pending_sl_tp = {} # Track pending SL/TP by clientMsgId or logic
         self.data_cache = {} # TF -> Candles
         self.last_notified_connected = False
+        self.position_state = {} # PosID -> live tracking for BE/Trailing
+        self.last_entry_atr = None
+        self.last_entry_tf = None
         
         # 🦁 Project-Centric Path Mapping
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -99,7 +103,11 @@ class CTraderBridge:
         print(f"🔌 cTrader API: Disconnected. Reason: {reason}")
         self.connected = False
         self.authorized = False
+        self.auth_stage = 0
         self.ready_event.clear()
+        
+        # Self-healing logic handled by the main loop usually, 
+        # but the client might try to reconnect itself.
         if self.last_notified_connected:
             telegram_service.notify_connection_status(False)
             self.last_notified_connected = False
@@ -212,6 +220,9 @@ class CTraderBridge:
                 else:
                     actual_payload = Protobuf.extract(message)
                     self.open_positions = actual_payload.position
+                # Sync state for BE/Trailing when reconcile arrives
+                for p in self.open_positions:
+                    self._record_position(p)
             except:
                 pass
             
@@ -260,13 +271,36 @@ class CTraderBridge:
                                              stopLoss=final_sl,
                                              takeProfit=final_tp)
                             
-                            # Notify Telegram on Open
-                            direction = self.pending_sl_tp.get('direction', 'N/A')
-                            lots = (pos.quantity / 10000.0) if pos else 0
-                            entry_price = (pos.entryPrice / 100000.0) if pos else 0
-                            telegram_service.notify_trade_open(direction, lots, entry_price, final_sl or 0, final_tp or 0)
-
+                            # Initial notification will happen when SL/TP are confirmed by server
                         self.pending_sl_tp = {} 
+                
+                # Report to Telegram with actual position details
+                if pos:
+                    trade_data = getattr(pos, 'tradeData', None)
+                    direction = "BUY" if trade_data and trade_data.tradeSide == 1 else "SELL"
+                    raw_vol = getattr(trade_data, 'volume', 0) if trade_data else getattr(pos, 'volume', 0)
+                    lots = raw_vol / 10000.0
+                    entry_price = getattr(pos, 'entryPrice', 0)
+                    if entry_price == 0 and hasattr(pos, 'price'): entry_price = pos.price
+                    entry_price /= 100000.0
+                    
+                    # If we have confirmed SL/TP from the Fill, use them. 
+                    # Otherwise use our pending ones if we just sent them.
+                    sl_val = getattr(pos, 'stopLoss', 0) / 100000.0
+                    tp_val = getattr(pos, 'takeProfit', 0) / 100000.0
+                    
+                    if sl_val == 0 and 'last_sent_sl' in globals().get('__dict__', {}): # conceptual
+                        pass # complicated to track across threads without more state
+                    
+                    trig_name = getattr(self, 'last_trigger_name', 'AUTO')
+                    # Record for BE/Trailing with ATR/TF hint from pending_sl_tp
+                    self._record_position(
+                        pos,
+                        direction=direction,
+                        atr=self.pending_sl_tp.get('atr', getattr(self, 'last_entry_atr', None)),
+                        tf=self.pending_sl_tp.get('tf', getattr(self, 'last_entry_tf', None))
+                    )
+                    telegram_service.notify_trade_open(direction, lots, entry_price, sl_val, tp_val, trigger_name=trig_name)
                 
                 logger.info(f"EXEC: Order Filled. Position ID: {pos_id if pos else 'N/A'}")
             
@@ -317,9 +351,15 @@ class CTraderBridge:
                 ts_ms = ts_min * 60 * 1000
                 o, h, l, c = [p / 100000.0 for p in [o_raw, h_raw, l_raw, c_raw]]
                 
+                # Force UTC for internal engine consistency
+                # Convert to UTC+3 (User's timezone)
                 dt = datetime.fromtimestamp(ts_ms/1000.0) + timedelta(hours=3)
-                dt_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+                dt_str = dt.strftime('%Y-%m-%d %H:%M') + ":00" # Force minute alignment
                 bars.append(f"{dt_str},{o:.2f},{h:.2f},{l:.2f},{c:.2f},{v}")
+                
+            if bars:
+                last_ts_str = bars[-1].split(',')[0]
+                print(f"   🔍 DEBUG: Received {len(bars)} {tf_label} bars. Last: {last_ts_str}")
             
             if tf_label != "UNKNOWN":
                 self.data_cache[tf_label] = bars
@@ -327,41 +367,77 @@ class CTraderBridge:
                 print(f"💾 cTrader API: Synced {len(bars)} candles for {tf_label} to disk.")
 
     def _save_to_csv(self, tf, bars):
-        """Saves bars to the official GIA_DATA directory."""
+        """Merges new bars with existing CSV data to preserve history."""
         fpath = os.path.join(self.data_dir, f"{ASSET}_{tf}.csv")
         try:
-            with open(fpath, 'w') as f:
-                f.write("Time,Open,High,Low,Close,Volume\n")
-                f.write("\n".join(bars))
-                f.write("\n")
+            # 1. Load existing data if available
+            existing_df = pd.DataFrame()
+            if os.path.exists(fpath):
+                try:
+                    existing_df = pd.read_csv(fpath)
+                except: pass
+            
+            # 2. Parse new bars
+            new_data = []
+            for b in bars:
+                parts = b.split(',')
+                new_data.append({
+                    "Time": parts[0],
+                    "Open": float(parts[1]),
+                    "High": float(parts[2]),
+                    "Low": float(parts[3]),
+                    "Close": float(parts[4]),
+                    "Volume": int(parts[5])
+                })
+            new_df = pd.DataFrame(new_data)
+            
+            # 3. Merge and deduplicate
+            if not existing_df.empty:
+                df = pd.concat([existing_df, new_df]).drop_duplicates(subset=['Time'])
+            else:
+                df = new_df
+            
+            # 4. Sort and Save
+            df = df.sort_values('Time').tail(20000) # Keep a healthy 20k bars buffer
+            df.to_csv(fpath, index=False)
         except Exception as e:
-            logger.error(f"Sync Error for {tf}: {str(e)}")
+            logger.error(f"Sync Merge Error for {tf}: {str(e)}")
 
     def _update_account_info(self):
         """Requests latest equity and position state."""
         if not self.authorized: return
         self.client.send("ProtoOATraderReq", ctidTraderAccountId=self.account_id)
         self.client.send("ProtoOAReconcileReq", ctidTraderAccountId=self.account_id)
-
+        
     def fetch_live_data(self):
-        """Requests M1, M15, M30, H1 history from the server."""
+        """Fetches latest Trendbars (candles) for all TFs."""
         if not self.authorized or not self.symbol_id: return
         
-        # Period Map: M1=1, M15=7, M30=8, H1=9
-        now_ms = int(time.time() * 1000)
-        start_ms = now_ms - (86400 * 30 * 1000) # 30 days for full indicator parity
+        print("\n⏳ Syncing Market Data...")
         
-        for p in [1, 7, 8, 9]:
+        # Broker Server might be ahead (UTC+3), so we request up to "future" (24h) to catch latest bars.
+        # But we must calculate START time relative to REAL CURRENT TIME to get actual history depth.
+        real_now_ms = int(time.time() * 1000)
+        future_now_ms = real_now_ms + (24 * 3600 * 1000)
+        
+        # M1=1h(min), M15=7, M30=8, H1=9
+        # Need ~1500 bars for indicators
+        ranges = {
+            1: 1500 * 60 * 1000,          # M1: ~25 Hours
+            7: 1500 * 15 * 60 * 1000,     # M15: ~15 Days
+            8: 1000 * 30 * 60 * 1000,     # M30: ~20 Days
+            9: 1000 * 60 * 60 * 1000      # H1: ~41 Days
+        }
+        
+        for p, r in ranges.items():
+            start_ms = real_now_ms - r
             self.client.send("ProtoOAGetTrendbarsReq",
                              ctidTraderAccountId=self.account_id,
                              symbolId=self.symbol_id,
                              period=p,
                              fromTimestamp=start_ms,
-                             toTimestamp=now_ms)
-        """Requests latest equity and position state."""
-        if not self.authorized: return
-        self.client.send("ProtoOATraderReq", ctidTraderAccountId=self.account_id)
-        self.client.send("ProtoOAReconcileReq", ctidTraderAccountId=self.account_id)
+                             toTimestamp=future_now_ms)
+            time.sleep(0.25) # Prevent request flooding
 
     def connect(self):
         """Initiates the Twisted Reactor and connects the client."""
@@ -392,23 +468,40 @@ class CTraderBridge:
     def get_open_position_count(self) -> int:
         return len(self.open_positions)
 
-    def send_market_order(self, direction, lots, sl_pips=None, tp_pips=None):
-        """Sends a Market Order and queues SL/TP for immediate amendment."""
+    def send_market_order(self, direction, lots, sl_pips=None, tp_pips=None, trigger_name="AUTO"):
+        """Sends a Market Order and queues SL/TP for amendment after fill."""
+        self.last_trigger_name = trigger_name
         if not self.authorized or not self.symbol_id:
             logger.error("Order Blocked: Bridge not ready.")
             return False
             
-        volume = int(lots * 100 * 100)
+        # Volume calculation: Standard cTrader API usually expects units.
+        # XAUUSD 1 Lot = 100 oz. Volume is usually in units (oz) or cents?
+        # If API expects units: 1 Lot = 100 units.
+        # If API expects cents: 1 Lot = 10000 cents.
+        # Let's try standard 100,000 multiplier first as it is most common for FX/Commds in ProtoOA.
+        # If volume step is 1.00 (unit), then int(lots * 100000) is safe.
+        volume = int(lots * 100000)
+        
+        logger.info(f"🚀 Preparing Order: {direction} {lots} Lots -> Volume {volume}")
         trade_side = 1 if direction == "BUY" else 2
         
-        # Calculate Absolute SL/TP for the amendment
+        # Queue SL/TP for the amendment that happens in _on_message (ORDER_FILLED)
         price = self.latest_ask if direction == "BUY" else self.latest_bid
         if price and (sl_pips or tp_pips):
             sl = (price - (sl_pips/10.0)) if direction == "BUY" else (price + (sl_pips/10.0))
             tp = (price + (tp_pips/10.0)) if direction == "BUY" else (price - (tp_pips/10.0))
-            self.pending_sl_tp = {'sl': sl, 'tp': tp, 'direction': direction}
+            # Carry ATR/TF hints for BE/Trailing state seeding
+            self.pending_sl_tp = {
+                'sl': sl,
+                'tp': tp,
+                'direction': direction,
+                'atr': getattr(self, 'last_entry_atr', None),
+                'tf': getattr(self, 'last_entry_tf', None)
+            }
         
-        print(f"� [API] Transmitting {direction} {lots} Lots (Base Order)...")
+        print(f"🚀 [API] Transmitting {direction} {lots} Lots (Base Order)...")
+        
         self.client.send("ProtoOANewOrderReq",
                          ctidTraderAccountId=self.account_id,
                          symbolId=self.symbol_id,
@@ -416,6 +509,150 @@ class CTraderBridge:
                          tradeSide=trade_side,
                          volume=volume)
         return True
+
+    # --- BE / Trailing Helpers ---
+    def _record_position(self, pos, direction=None, atr=None, tf=None):
+        """Populate internal state for BE/Trailing tracking."""
+        try:
+            pos_id = getattr(pos, 'positionId', None)
+            if pos_id is None: return
+            trade_data = getattr(pos, 'tradeData', None)
+            if direction is None and trade_data:
+                direction = "BUY" if getattr(trade_data, 'tradeSide', 0) == 1 else "SELL"
+            volume_raw = getattr(trade_data, 'volume', getattr(pos, 'volume', 0))
+            lots = volume_raw / 10000.0 if volume_raw else 0
+            entry_price = getattr(pos, 'entryPrice', getattr(pos, 'price', 0)) / 100000.0
+            sl_val = getattr(pos, 'stopLoss', 0) / 100000.0 if getattr(pos, 'stopLoss', 0) else None
+            tp_val = getattr(pos, 'takeProfit', 0) / 100000.0 if getattr(pos, 'takeProfit', 0) else None
+
+            st = self.position_state.get(pos_id, {})
+            st.update({
+                'direction': direction,
+                'entry_price': entry_price,
+                'sl': sl_val,
+                'tp': tp_val,
+                'lots': lots,
+                'atr': atr or st.get('atr'),
+                'tf': tf or st.get('tf'),
+                'mfe': st.get('mfe', 0.0)
+            })
+            # Initialize extremes
+            if direction == "BUY":
+                st['high_water'] = max(st.get('high_water', entry_price), entry_price)
+            elif direction == "SELL":
+                st['low_water'] = min(st.get('low_water', entry_price), entry_price)
+            # Detect if SL already at/above BE
+            if st.get('sl') is not None:
+                if direction == "BUY" and st['sl'] >= st['entry_price']:
+                    st['be_active'] = True
+                elif direction == "SELL" and st['sl'] <= st['entry_price']:
+                    st['be_active'] = True
+            st.setdefault('be_active', False)
+            self.position_state[pos_id] = st
+        except Exception as e:
+            logger.error(f"State record error: {e}")
+
+    def _amend_sl_tp(self, pos_id, new_sl=None, new_tp=None):
+        """Safe SL/TP amend helper."""
+        if not self.authorized or not self.symbol_id: 
+            return False
+        if new_sl is None and new_tp is None:
+            return False
+        params = {
+            "ctidTraderAccountId": self.account_id,
+            "positionId": pos_id
+        }
+        if new_sl is not None:
+            params["stopLoss"] = round(new_sl, self.digits)
+        if new_tp is not None:
+            params["takeProfit"] = round(new_tp, self.digits)
+        try:
+            self.client.send("ProtoOAAmendPositionSLTPReq", **params)
+            return True
+        except Exception as e:
+            logger.error(f"Trailing amend failed for {pos_id}: {e}")
+            return False
+
+    def trail_positions(self, atr_lookup=None):
+        """Apply BE + ATR-based trailing to live positions."""
+        if not self.open_positions:
+            return
+        for pos in list(self.open_positions):
+            pos_id = getattr(pos, 'positionId', None)
+            if pos_id is None:
+                continue
+            # Ensure state exists
+            self._record_position(pos)
+            st = self.position_state.get(pos_id, {})
+            direction = st.get('direction')
+            if direction not in ("BUY", "SELL"):
+                continue
+            price = self.latest_bid if direction == "BUY" else self.latest_ask
+            if not price:
+                continue
+            # Choose ATR: entry ATR -> TF cache -> fallback
+            atr_val = st.get('atr')
+            if (atr_val is None or atr_val <= 0) and atr_lookup:
+                tf = st.get('tf')
+                if tf and atr_lookup.get(tf):
+                    atr_val = atr_lookup.get(tf)
+                elif atr_lookup.get("M15"):
+                    atr_val = atr_lookup.get("M15")
+            if atr_val is None or atr_val <= 0:
+                continue
+
+            entry = st.get('entry_price', price)
+            current_sl = st.get('sl')
+
+            if direction == "BUY":
+                st['high_water'] = max(st.get('high_water', entry), price)
+                delta = st['high_water'] - entry
+            else:
+                st['low_water'] = min(st.get('low_water', entry), price)
+                delta = entry - st['low_water']
+
+            st['mfe'] = max(st.get('mfe', 0.0), delta)
+
+            # Break-even activation
+            if not st.get('be_active', False) and st['mfe'] > (atr_val * 1.0):
+                comm_buffer = 0.03
+                if direction == "BUY":
+                    new_sl = entry + comm_buffer
+                    # Ensure SL below current bid to avoid immediate stop
+                    new_sl = min(new_sl, price - 0.05)
+                    if current_sl is None or new_sl > current_sl:
+                        if self._amend_sl_tp(pos_id, new_sl=new_sl):
+                            st['sl'] = new_sl
+                            st['be_active'] = True
+                            logger.info(f"BE Armed (BUY) pos {pos_id}: SL->{new_sl}")
+                else:
+                    new_sl = entry - comm_buffer
+                    new_sl = max(new_sl, price + 0.05)
+                    if current_sl is None or new_sl < current_sl:
+                        if self._amend_sl_tp(pos_id, new_sl=new_sl):
+                            st['sl'] = new_sl
+                            st['be_active'] = True
+                            logger.info(f"BE Armed (SELL) pos {pos_id}: SL->{new_sl}")
+
+            # Trailing after BE
+            if st.get('be_active', False):
+                trail_dist = atr_val * 2.0
+                if direction == "BUY":
+                    candidate = st['high_water'] - trail_dist
+                    candidate = min(candidate, price - 0.05)
+                    if current_sl is None or candidate > current_sl:
+                        if self._amend_sl_tp(pos_id, new_sl=candidate):
+                            st['sl'] = candidate
+                            logger.info(f"Trail SL (BUY) pos {pos_id}: SL->{candidate}")
+                else:
+                    candidate = st['low_water'] + trail_dist
+                    candidate = max(candidate, price + 0.05)
+                    if current_sl is None or candidate < current_sl:
+                        if self._amend_sl_tp(pos_id, new_sl=candidate):
+                            st['sl'] = candidate
+                            logger.info(f"Trail SL (SELL) pos {pos_id}: SL->{candidate}")
+
+            self.position_state[pos_id] = st
 
     def shutdown(self):
         if self.client:

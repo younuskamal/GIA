@@ -143,6 +143,8 @@ def process_raw_data(df):
     df.loc[df['pct_change_next'] > 0.2, 'label'] = 'BUY'
     df.loc[df['pct_change_next'] < -0.2, 'label'] = 'SELL'
     
-    # Final cleanup
-    df = df.dropna().reset_index(drop=True)
+    # Final cleanup - Don't drop all NaN, just fill forward and drop remaining in critical columns
+    df = df.ffill().bfill()
+    critical_cols = ['close', 'rsi', 'atr', 'date']
+    df = df.dropna(subset=[c for c in critical_cols if c in df.columns]).reset_index(drop=True)
     return df

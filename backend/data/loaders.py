@@ -108,7 +108,7 @@ def load_history_data(timeframe="H1", start_year=None, end_year=None):
     }
     
     filename = file_map.get(timeframe, "XAUUSD_H1.csv")
-    path = CACHE_DIR / "hestory" / filename
+    path = BASE_DIR / "data" / filename
     
     # NEW STABLE LOCAL PATH (Bypassing OneDrive)
     local_path = Path(rf"C:\GIA_DATA\{filename}")

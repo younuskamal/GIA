@@ -165,8 +165,8 @@ class FeatureFactory:
             elif f in ['body_ratio', 'body_rel']:
                 df[f] = (df['close'] - df['open']).abs() / (df['high'] - df['low'] + 1e-9)
             elif f == 'wick_ratio':
-                up = (df['high'] - df[['open', 'close']].max(axis=1))
-                lo = (df[['open', 'close']].min(axis=1) - df['low'])
+                up = (df['high'] - df[['open', 'close']].max(axis=1)) / (df['close'] + 1e-9)
+                lo = (df[['open', 'close']].min(axis=1) - df['low']) / (df['close'] + 1e-9)
                 df['wick_ratio'] = up / (lo + 1e-9)
             elif f == 'body_size': 
                 df['body_size'] = (df['close'] - df['open']).abs() / (df['close'] + 1e-9)
@@ -196,23 +196,26 @@ class FeatureFactory:
             elif f == 'vol_regime':
                 v20 = df['close'].rolling(20).std()
                 df['vol_regime'] = (v20 / (v20.rolling(200).mean() + 1e-9)).fillna(1.0)
-            elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour', 'session_london', 'session_ny', 'is_high_liquidity']:
+            elif f == 'vol_ratio':
+                v20 = df['close'].rolling(20).std()
+                df['vol_ratio'] = v20 / (v20.rolling(50).mean() + 1e-9)
+            elif f == 'exhaustion_index':
+                v20 = df['close'].rolling(20).std()
+                df['exhaustion_index'] = (df['close'] - df['close'].rolling(50).mean()).abs() / (v20 * 2 + 1e-9)
+            elif f in ['is_london', 'is_ny', 'is_peak', 'is_peak_hour', 'session_london', 'session_ny', 'is_high_liquidity', 'is_newyork', 'session_active']:
                 hour = df['date'].dt.hour
                 df['is_london'] = ((hour >= 8) & (hour <= 16)).astype(int)
                 df['is_ny'] = ((hour >= 13) & (hour <= 21)).astype(int)
+                df['is_newyork'] = df['is_ny'] # Scalper compatibility sync
                 df['session_london'] = df['is_london']
                 df['session_ny'] = df['is_ny']
                 df['is_peak'] = ((hour >= 7) & (hour <= 21)).astype(int)
                 df['is_peak_hour'] = df['is_peak']
+                df['session_active'] = df['is_peak'] # Alias for scalper
                 df['is_high_liquidity'] = ((hour >= 8) & (hour <= 11)) | ((hour >= 13) & (hour <= 16))
             elif f == 'velocity':
-                # Institutional Sync: GIA_SIGNAL_PRO uses 1-period diff, others use 5-period normalized
-                # We auto-detect based on accompanying features
-                if 'acceleration' in features_needed:
-                    df['velocity'] = df['close'].diff(1) / (df['close'].shift(1) + 1e-9)
-                else:
-                    v20 = df['close'].rolling(20).std()
-                    df['velocity'] = df['close'].diff(5) / (v20 + 1e-9)
+                v20 = df['close'].rolling(20).std()
+                df['velocity'] = df['close'].diff(5) / (v20 + 1e-9)
             elif f == 'acceleration':
                 # Force 1-period velocity for acceleration derivation
                 vel_raw = df['close'].diff(1) / (df['close'].shift(1) + 1e-9)
@@ -220,8 +223,8 @@ class FeatureFactory:
             elif f == 'coiling':
                 ma = df['close'].rolling(20).mean()
                 std = df['close'].rolling(20).std()
-                bw = (4 * std) / (ma + 1e-6)
-                df['coiling'] = bw / (bw.rolling(50).mean() + 1e-6)
+                bw = (4 * std) / (ma + 1e-9)
+                df['coiling'] = bw / (bw.rolling(50).mean() + 1e-9)
             elif f == 'price_dist_bb':
                 ma = df['close'].rolling(20).mean()
                 df['price_dist_bb'] = (df['close'] - ma) / (ma + 1e-6)
@@ -230,11 +233,10 @@ class FeatureFactory:
                 rv = FeatureFactory._rsi(df['close']).diff(5) / 100.0
                 df['div_proxy'] = pv - rv
             elif f == 'ribbon_align':
-
                 align = 0
                 for s in [9, 21, 50, 100, 200]:
                     ema = df['close'].ewm(span=s, adjust=False).mean()
-                    align += np.sign((df['close'] - ema) / (ema + 1e-6))
+                    align += np.sign((df['close'] - ema) / (ema + 1e-9))
                 df['ribbon_align'] = align / 5.0
             elif f == 'trend_harmony':
                 e12 = df['close'].ewm(span=12, adjust=False).mean()
@@ -259,8 +261,7 @@ class FeatureFactory:
                 vel = df['close'].diff(5) / (v20 + 1e-9)
                 df['price_acceleration'] = vel.diff(3)
             elif f == 'liquidity_shock':
-                avg_vol = df['volume'].rolling(20).mean()
-                df['liquidity_shock'] = df['volume'] / (avg_vol + 1e-9)
+                df['liquidity_shock'] = df['volume'] / (df['volume'].rolling(50).mean() + 1e-9)
             elif f == 'market_entropy':
                 diff_sum = df['close'].diff().abs().rolling(10).sum()
                 range_sum = (df['high'].rolling(10).max() - df['low'].rolling(10).min() + 1e-9)
@@ -957,7 +958,7 @@ class BattleArena:
                 "GIA_v2_PRO.pkl": {"tf": "M15", "broker": "FIPER", "risk": 1.0, "latency": 0.05, "desc": "Institutional Hybrid (Elite)"},
                 "GIA_v14_PRO.pkl": {"tf": "H1", "broker": "PEPPERSTONE", "risk": 1.5, "latency": 0.15, "desc": "Strategic Trend Hunter"},
                 "GIA_v1.1_PRO.pkl": {"tf": "M15", "broker": "IC MARKETS", "risk": 1.0, "latency": 0.1, "desc": "Standard Balanced Bot"},
-                "GIA_v2_FLASH.pkl": {"tf": "M15", "broker": "IC MARKETS", "risk": 1.2, "latency": 0.05, "desc": "High-Velocity Engine"}
+                "GIA_v2_FLASH.pkl": {"tf": "M1", "broker": "IC MARKETS", "risk": 1.2, "latency": 0.05, "desc": "High-Velocity Scalper (M1)"}
             }
 
             print(f"\n {Fore.YELLOW}STEP 1: SELECT YOUR AI MODEL{Style.RESET_ALL}")
@@ -966,9 +967,14 @@ class BattleArena:
                 intelligence = MODEL_NAVIGATOR.get(m, {"tf": "M15", "desc": "Universal Mode"})
                 print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:22} {tag} | {intelligence['tf']} | {intelligence['desc']}")
             print(f"  [{Fore.GREEN}A{Style.RESET_ALL}] COMPARE ALL MODELS")
+            print(f"  [{Fore.GREEN}P{Style.RESET_ALL}] PORTFOLIO (Elite Duo: v2_PRO + v2_FLASH)")
             
             choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
-            targets = all_models if choice == 'A' else [all_models[int(choice)-1]] if choice.isdigit() else [all_models[0]]
+            if choice == 'P':
+                targets = ["GIA_v2_PRO.pkl", "GIA_v2_FLASH.pkl"]
+                print(f"   {Fore.CYAN}💎 ELITE DUO ACTIVATED: Combining Tactical Trend + High-Velocity Scalping.{Style.RESET_ALL}")
+            else:
+                targets = all_models if choice == 'A' else [all_models[int(choice)-1]] if choice.isdigit() and 0 < int(choice) <= len(all_models) else [all_models[0]]
 
             print(f"\n {Fore.YELLOW}STEP 1.5: SELECT ASSET{Style.RESET_ALL}")
             print(f"  [{Fore.GREEN}1{Style.RESET_ALL}] XAUUSD    [{Fore.GREEN}2{Style.RESET_ALL}] BTCUSD")
@@ -977,6 +983,16 @@ class BattleArena:
             a_choice = input(f"\n {Fore.WHITE}Select Asset [Enter for {self.asset}] > {Style.RESET_ALL}").strip()
             asset_map = {"1":"XAUUSD", "2":"BTCUSD", "3":"USDJPY", "4":"GBPJPY", "5":"XAGUSD"}
             if a_choice in asset_map: self.asset = asset_map[a_choice]
+
+            # 🦁 Institutional Defaults (Safe Initialize)
+            tf = "M15"
+            broker = "FIPER"
+            sizing_mode = "dynamic"
+            fixed_lot = 0.01
+            capital = 1000.0
+            risk = 1.0
+            latency = 0.1
+            start_y, end_y = 2024, datetime.now().year
 
 
             # AUTO-CONFIG (If single model selected)
@@ -993,38 +1009,38 @@ class BattleArena:
                     risk = m_intel['risk']
                     latency = m_intel['latency']
                     sizing_mode = "dynamic"
-                    capital = 500
+                    capital = 500.0
                     start_y, end_y = 2024, datetime.now().year
                     print(f"   {Fore.GREEN}✔ Settings Applied.{Style.RESET_ALL}")
                 else:
                     auto_config = False # Force manual if user says no
-
-
-            print(f"\n {Fore.YELLOW}STEP 2: SELECT EXECUTION TIMEFRAME{Style.RESET_ALL}")
-            print(f"  [{Fore.GREEN}0{Style.RESET_ALL}] M1 (Scalping)   [{Fore.GREEN}1{Style.RESET_ALL}] M15 (Tactical)  [{Fore.GREEN}2{Style.RESET_ALL}] M30 (Balanced)  [{Fore.GREEN}3{Style.RESET_ALL}] H1 (Strategic)")
-            tf_choice = input(f"\n {Fore.WHITE}Enter Selection [Default M15] > {Style.RESET_ALL}").strip() or "1"
-            tf = {"0":"M1", "1":"M15", "2":"M30", "3":"H1"}.get(tf_choice, "M15")
-
-            print(f"\n {Fore.YELLOW}STEP 3: cTRADER INSTITUTIONAL PHYSICS{Style.RESET_ALL}")
-            brokers = list(BrokerSimulator.PROFILES.keys())
-            for i, b in enumerate(brokers): 
-                p = BrokerSimulator.PROFILES[b]
-                print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {p.name:20}", end=" " if (i+1)%2 != 0 else "\n")
-            b_choice = input(f"\n\n {Fore.WHITE}Select Broker [Enter for FIPER] > {Style.RESET_ALL}").strip()
-            broker = brokers[int(b_choice)-1] if b_choice.isdigit() else "FIPER"
             
-            sizing_mode = "dynamic" if (input(f"\n {Fore.YELLOW}STEP 4: MM MODE (1=Dynamic, 2=Fixed) > {Style.RESET_ALL}") or "1") == "1" else "fixed"
-            fixed_lot = float(input(f"  {Fore.WHITE}Fixed Lot Size [0.01] > {Style.RESET_ALL}") or 0.01) if sizing_mode == "fixed" else 0.01
-            capital = float(input(f"  {Fore.WHITE}STEP 5: CAPITAL > {Style.RESET_ALL}") or 1000)
-            risk = float(input(f"  {Fore.WHITE}STEP 6: RISK % > {Style.RESET_ALL}") or 1.0) if sizing_mode == "dynamic" else 1.0
-            
-            print(f"\n {Fore.YELLOW}STEP 7: YEAR RANGE (2010-2025){Style.RESET_ALL}")
-            current_yr = datetime.now().year
-            start_y = int(input(f"  {Fore.WHITE}Start Year [2024] > {Style.RESET_ALL}") or 2024)
-            end_y = int(input(f"  {Fore.WHITE}End Year [{current_yr}] > {Style.RESET_ALL}") or current_yr)
-            
-            print(f"\n {Fore.YELLOW}STEP 8: INSTITUTIONAL LATENCY (Seconds){Style.RESET_ALL}")
-            latency = float(input(f"  {Fore.WHITE}Execution Delay [0.1s] > {Style.RESET_ALL}") or 0.1)
+            if not auto_config:
+                print(f"\n {Fore.YELLOW}STEP 2: SELECT EXECUTION TIMEFRAME{Style.RESET_ALL}")
+                print(f"  [{Fore.GREEN}0{Style.RESET_ALL}] M1 (Scalping)   [{Fore.GREEN}1{Style.RESET_ALL}] M15 (Tactical)  [{Fore.GREEN}2{Style.RESET_ALL}] M30 (Balanced)  [{Fore.GREEN}3{Style.RESET_ALL}] H1 (Strategic)")
+                tf_choice = input(f"\n {Fore.WHITE}Enter Selection [Default M15] > {Style.RESET_ALL}").strip() or "1"
+                tf = {"0":"M1", "1":"M15", "2":"M30", "3":"H1"}.get(tf_choice, "M15")
+
+                print(f"\n {Fore.YELLOW}STEP 3: cTRADER INSTITUTIONAL PHYSICS{Style.RESET_ALL}")
+                brokers = list(BrokerSimulator.PROFILES.keys())
+                for i, b in enumerate(brokers): 
+                    p = BrokerSimulator.PROFILES[b]
+                    print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {p.name:20}", end=" " if (i+1)%2 != 0 else "\n")
+                b_choice = input(f"\n\n {Fore.WHITE}Select Broker [Enter for FIPER] > {Style.RESET_ALL}").strip()
+                broker = brokers[int(b_choice)-1] if b_choice.isdigit() else "FIPER"
+                
+                sizing_mode = "dynamic" if (input(f"\n {Fore.YELLOW}STEP 4: MM MODE (1=Dynamic, 2=Fixed) > {Style.RESET_ALL}") or "1") == "1" else "fixed"
+                fixed_lot = float(input(f"  {Fore.WHITE}Fixed Lot Size [0.01] > {Style.RESET_ALL}") or 0.01) if sizing_mode == "fixed" else 0.01
+                capital = float(input(f"  {Fore.WHITE}STEP 5: CAPITAL > {Style.RESET_ALL}") or 1000)
+                risk = float(input(f"  {Fore.WHITE}STEP 6: RISK % > {Style.RESET_ALL}") or 1.0) if sizing_mode == "dynamic" else 1.0
+                
+                print(f"\n {Fore.YELLOW}STEP 7: YEAR RANGE (2010-2025){Style.RESET_ALL}")
+                current_yr = datetime.now().year
+                start_y = int(input(f"  {Fore.WHITE}Start Year [2024] > {Style.RESET_ALL}") or 2024)
+                end_y = int(input(f"  {Fore.WHITE}End Year [{current_yr}] > {Style.RESET_ALL}") or current_yr)
+                
+                print(f"\n {Fore.YELLOW}STEP 8: INSTITUTIONAL LATENCY (Seconds){Style.RESET_ALL}")
+                latency = float(input(f"  {Fore.WHITE}Execution Delay [0.1s] > {Style.RESET_ALL}") or 0.1)
 
         # --- EXECUTION LOOP ---
         final_table = []
@@ -1033,19 +1049,20 @@ class BattleArena:
         
         # 🧪 Turbo Cache: Avoid re-calculating common features
         TIMEFRAME_CACHE = {} 
+        portfolio_trades = []
 
 
         for m_name in targets:
             print_separator("-", color=Fore.LIGHTBLACK_EX)
             
             # 🦁 Institutional Smart Dispatcher:
-            # If comparing, automatically use each model's native timeframe
-            if choice == 'A':
-                # Dynamically fetch intel even if model wasn't in original registry
+            # Native timeframe assignment for Compare and Portfolio modes
+            if choice in ['A', 'P']:
                 temp_intel = {
                     "GIA_SIGNAL_PRO.pkl": "M1",
                     "GIA_v2_PRO.pkl": "M15",
-                    "GIA_v14_PRO.pkl": "H1"
+                    "GIA_v14_PRO.pkl": "H1",
+                    "GIA_v2_FLASH.pkl": "M1"
                 }
                 current_tf = temp_intel.get(m_name, base_tf)
             else:
@@ -1071,14 +1088,15 @@ class BattleArena:
 
                 m_data = joblib.load(path)
                 req_feats = m_data.get('feature_columns', m_data.get('features', []))
-                needs_mtf = any(('_h1' in f or '_m15' in f or '_m5' in f or '_m30' in f) for f in req_feats)
-                
+                needs_mtf = any((x in f.lower()) for f in req_feats for x in ['_h1', '_m15', '_m5', '_m30'])
+
+                # 🛡️ Data Synchronizer: Load native candles + required context (Multi-Timeframe)
                 df = self._load_data(current_tf, needs_mtf)
                 print(f"   📊 Loaded: {len(df)} candles for {current_tf}")
                 
                 df = df[(df['date'].dt.year >= start_y) & (df['date'].dt.year <= end_y)].copy()
                 if df.empty:
-                    print(f"   {Fore.YELLOW}⚠️ No data found for specified years {start_y}-{end_y}. (Year range in file: {df['date'].min() if not df.empty else 'N/A'}){Style.RESET_ALL}")
+                    print(f"   {Fore.YELLOW}⚠️ No data found for specified years {start_y}-{end_y}.{Style.RESET_ALL}")
                     continue
                 
                 # 🧠 Turbo-Feature Engineering
@@ -1086,11 +1104,18 @@ class BattleArena:
                     TIMEFRAME_CACHE[current_tf] = df.copy()
                 
                 print(f"   🔍 Constructing Features for {m_name}...")
-                # Re-use cached features and only add new ones
-                TIMEFRAME_CACHE[current_tf] = FeatureFactory.construct(TIMEFRAME_CACHE[current_tf], req_feats)
-                df_proc = TIMEFRAME_CACHE[current_tf].dropna(subset=[f for f in req_feats if f in TIMEFRAME_CACHE[current_tf].columns])
+                
+                # A. Intelligence Construction
+                df_proc = FeatureFactory.construct(df.copy(), req_feats)
+                
+                # C. Final Clean-up (Institutional Standards)
+                df_proc = df_proc.replace([np.inf, -np.inf], 0).ffill().fillna(0)
+                
+                df_proc = df_proc.dropna(subset=[f for f in req_feats if f in df_proc.columns])
 
                 
+                # 🦁 Institutional Smart Dispatcher: Detection for UHF/Flash Engine
+                is_uhf = "PREDATOR" in m_name.upper() or "FLASH" in m_name.upper()
                 engine = BacktestEngine(model_path=path, is_legacy="v14" in m_name)
                 engine.load_model()
                 
@@ -1102,7 +1127,10 @@ class BattleArena:
                     current_broker = intel.get('broker', broker)
                     current_latency = intel.get('latency', latency)
 
-                res = engine.backtest(df_proc, broker_name=current_broker, initial_balance=capital, risk_pct=risk, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot, execution_latency=current_latency)
+                # 🦁 Portfolio Risk Logic: Enforce 0.5% for FLASH in Elite Duo mode
+                active_risk = 0.5 if (choice == 'P' and "FLASH" in m_name.upper()) else risk
+                
+                res = engine.backtest(df_proc, broker_name=current_broker, initial_balance=capital, risk_pct=active_risk, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot, execution_latency=current_latency)
                 
                 if "error" in res:
                     print(f"   {Fore.RED}❌ Simulation Error: {res['error']}{Style.RESET_ALL}")
@@ -1120,20 +1148,25 @@ class BattleArena:
                 from joblib import Parallel, delayed
                 
                 def run_single_mc():
-                    rmc = engine.backtest(df_proc, broker_name=broker, risk_pct=risk, initial_balance=capital, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot, execution_latency=latency)
+                    rmc = engine.backtest(df_proc, broker_name=broker, risk_pct=active_risk, initial_balance=capital, sizing_mode=sizing_mode, fixed_lot_size=fixed_lot, execution_latency=latency)
                     return rmc.get('net_profit_pct', -100) if "error" not in rmc else -100
 
                 mc_results = Parallel(n_jobs=-1, prefer="threads")(delayed(run_single_mc)() for _ in range(5))
                 survival = (len([p for p in mc_results if p > 0]) / len(mc_results)) * 100 if mc_results else 0
 
                 
-                params = {"tf": current_tf, "broker": broker, "start": start_y, "end": end_y, "risk": risk if sizing_mode == 'dynamic' else f"FIXED {fixed_lot}", "mode": sizing_mode}
+                params = {"tf": current_tf, "broker": broker, "start": start_y, "end": end_y, "risk": active_risk if sizing_mode == 'dynamic' else f"FIXED {fixed_lot}", "mode": sizing_mode}
                 save_path = ExportManager.save(m_name, res, survival, params)
                 
                 print_ascii_chart(res['equity_curve'], title=f"GIA Elite Bench: {m_name}")
                 print(f" {Fore.WHITE}Trades: {Fore.GREEN}{res['win_count']}W {Fore.RED}{res['loss_count']}L {Fore.WHITE}| ROI: {res['net_profit_pct']:.2f}% | Surv (Monte Carlo): {survival:.1f}%")
                 
                 final_table.append({"Model": m_name, "PF": res['profit_factor'], "DD": res['max_drawdown'], "ROI%": res['net_profit_pct'], "Surv%": survival})
+                if choice == 'P':
+                    # Log trades for portfolio merge
+                    for t in res.get('trades', []):
+                        t['model_source'] = m_name
+                        portfolio_trades.append(t)
                 comparison_data.append({
                     "model": m_name, 
                     "equity": res.get('daily_equity', res['equity_curve']), 
@@ -1149,6 +1182,58 @@ class BattleArena:
 
         if len(final_table) > 1:
             self._print_scoreboard(final_table)
+            
+            if choice == 'P' and portfolio_trades:
+                # 🦁 GIA MASTER PORTFOLIO AGGREGATION
+                print(f"\n{Fore.CYAN}╔════════════════════════════════════════════════════════╗")
+                print(f"║ {Fore.WHITE}      🏆 GIA MASTER PORTFOLIO: ELITE DUO           {Fore.CYAN}║")
+                print(f"╚════════════════════════════════════════════════════════╝{Style.RESET_ALL}")
+                
+                 # 1. Chronological Merge
+                sorted_trades = sorted(portfolio_trades, key=lambda x: x['entry_date'])
+                
+                # 2. Sequential Equity Calculation
+                balance = capital
+                equity_curve = [balance]
+                wins, losses = 0, 0
+                gross_profit, gross_loss = 0, 0
+                
+                for t in sorted_trades:
+                    pnl = t['pnl_net']
+                    balance += pnl
+                    equity_curve.append(balance)
+                    if pnl > 0:
+                        wins += 1
+                        gross_profit += pnl
+                    else:
+                        losses += 1
+                        gross_loss += abs(pnl)
+                
+                # 3. Stats Calculation
+                pf = gross_profit / (gross_loss + 1e-9)
+                roi = ((balance - capital) / capital) * 100
+                wr = (wins / (wins + losses)) * 100 if (wins + losses) > 0 else 0
+                
+                # Dynamic Drawdown calc
+                peak = capital
+                max_dd = 0
+                for v in equity_curve:
+                    if v > peak: peak = v
+                    dd = (peak - v) / peak * 100
+                    if dd > max_dd: max_dd = dd
+                
+                print_separator("-")
+                print_ascii_chart(equity_curve, title="GIA Duo Master Curve (Tactical + Flash)")
+                
+                print(f"\n {Fore.GREEN}⭐ HARMONY RESULTS:{Style.RESET_ALL}")
+                print(f"   Total Trades: {len(sorted_trades)} ({wins}W / {losses}L)")
+                print(f"   Combined ROI: {Fore.GREEN}{roi:.2f}%{Style.RESET_ALL}")
+                print(f"   Profit Factor: {Fore.YELLOW}{pf:.2f}{Style.RESET_ALL}")
+                print(f"   Max Drawdown: {Fore.RED}{max_dd:.2f}%{Style.RESET_ALL}")
+                print(f"   Win Rate: {wr:.1f}%")
+                
+                print(f"\n {Fore.CYAN}💡 INSIGHT: {Fore.WHITE}The Models completed each other. FLASH provided liquidity \n            during flat PRO trends, while PRO captured the major legs.{Style.RESET_ALL}")
+                print_separator("-")
             dash_path = ExportManager._generate_comparison_dashboard(comparison_data, {"broker": broker})
             print(f"\n{Fore.GREEN}🏆 Global Dashboard Ready: {Fore.WHITE}{dash_path}{Style.RESET_ALL}")
 

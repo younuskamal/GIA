@@ -27,7 +27,7 @@ logging.basicConfig(
 )
 
 from backend.engine.consensus import TripleConsensusModel
-from backend.engine.inference import GoldAnalysisModel
+from backend.engine.inference import GoldAnalysisModel, EliteDuoEngine
 from backend.connectors.ctrader_bridge import CTraderBridge
 from backend.core.rules import RiskRules
 from backend.services.telegram_service import telegram_service
@@ -137,14 +137,23 @@ def run_production_engine():
     analyzer = None
     # is_consensus is already set above
     
+    is_flash_mode = False
+    is_duo_mode = False
     if choice == 'C':
         analyzer = TripleConsensusModel(models_main_dir)
-        # is_consensus = True # Already set
+    elif choice == 'P':
+        analyzer = EliteDuoEngine(models_main_dir)
+        is_duo_mode = True
+        print(f"   {Fore.CYAN}💎 ELITE DUO ACTIVATED: Harmonizing PRO (M15) & FLASH (M1).{Style.RESET_ALL}")
     elif choice.isdigit() and 1 <= int(choice) <= len(all_models):
         m_name = all_models[int(choice)-1]
         analyzer = GoldAnalysisModel(model_path=model_paths[m_name])
+        if "FLASH" in m_name.upper():
+            is_flash_mode = True
+            global TIMEFRAME
+            TIMEFRAME = "M1"
     else:
-        print(f"{Fore.RED}❌ ERROR: Invalid Model Selection. Shutting down.{Style.RESET_ALL}")
+        print(f"{Fore.RED}❌ ERROR: Invalid Model Selection. Use 1-{len(all_models)}, C or P.{Style.RESET_ALL}")
         return
 
     # 4. Connect to cTrader Bridge
@@ -162,8 +171,14 @@ def run_production_engine():
     
     telegram_service.broadcast("✅ <b>GIA Connected & Authorized. Monitoring Market...</b>")
 
-    # State
-    last_processed_ts = get_latest_ts(f"{ASSET}_M15.csv")
+    # State Synchronizer
+    if not hasattr(run_institutional_engine, 'processed_dict'):
+        run_institutional_engine.processed_dict = {"M1": "", "M15": "", "H1": ""}
+    
+    # Pre-populate with latest timestamps to prevent ghost trades on launch
+    run_institutional_engine.processed_dict["M1"] = get_latest_ts(f"{ASSET}_M1.csv") or ""
+    run_institutional_engine.processed_dict["M15"] = get_latest_ts(f"{ASSET}_M15.csv") or ""
+
     last_check_time = time.time()
     last_sync_time = 0
     last_daily_report_day = datetime.now().day
@@ -197,53 +212,63 @@ def run_production_engine():
                 open_count = bridge.get_open_position_count()
                 
                 # 2. AUTONOMOUS TRIGGER & SYNC
-                trigger_detected = False
+                # In DUO mode, we track two triggers (M1 and M15)
+                triggers = []
                 
                 # Auto-sync every 10 seconds
                 if time.time() - last_sync_time > 10:
-                    # Clear dashboard line before printing sync info
                     sys.stdout.write("\n")
                     bridge.fetch_live_data()
                     last_sync_time = time.time()
                     
-                    # 🔔 PRE-ALERT SYSTEM (At minute 13, 28, 43, 58)
+                    # 🔔 DUO/PRO PRE-ALERT
                     if now.minute % 15 == 13 and now.second < 15:
-                        # Quick peek analysis
                         try:
-                            # We force a quick analysis on current partial data
-                            res = analyzer.analyze() 
+                            check_analyzer = analyzer.pro if is_duo_mode else analyzer
+                            res = check_analyzer.analyze() 
                             if res['success'] and res['signal'] in ['BUY', 'SELL'] and res.get('confidence', 0) > 65:
-                                telegram_service.notify_pre_alert(
-                                    res['signal'], 
-                                    f"تكوين نموذج {res['signal']} قوي", 
-                                    res.get('confidence', 0)
-                                )
-                                logging.info(f"🔔 Pre-Alert Sent: {res['signal']}")
-                                time.sleep(15) # Prevent spam
-                        except Exception as e:
-                            logging.error(f"Pre-Alert Check Failed: {e}")
+                                telegram_service.notify_pre_alert(res['signal'], f"Duo-Formation: Strong {res['signal']}", res.get('confidence',0))
+                                time.sleep(15)
+                        except: pass
 
-                    # Trigger only at start of 15-min candle (with 5s safety buffer)
-                    if now.minute % 15 == 0 and 5 <= now.second <= 25:
-                        trigger_detected = True
-                
-                if trigger_detected:
-                    m15_ts = get_latest_ts(f"{ASSET}_M15.csv")
-                    if m15_ts and m15_ts != last_processed_ts:
+                    # Determine what needs to run
+                    if is_duo_mode:
+                        # M1 Trigger (Flash)
+                        if 5 <= now.second <= 25:
+                            triggers.append({'tf': 'M1', 'model': analyzer.flash, 'name': 'FLASH'})
+                        # M15 Trigger (Pro)
+                        if now.minute % 15 == 0 and 5 <= now.second <= 25:
+                            triggers.append({'tf': 'M15', 'model': analyzer.pro, 'name': 'PRO'})
+                    else:
+                        is_triggered = False
+                        if TIMEFRAME == "M1":
+                            if 5 <= now.second <= 25: is_triggered = True
+                        else:
+                            if now.minute % 15 == 0 and 5 <= now.second <= 25: is_triggered = True
+                        
+                        if is_triggered:
+                            triggers.append({'tf': TIMEFRAME, 'model': analyzer, 'name': 'SINGLE'})
+                for trigger in triggers:
+                    target_tf = trigger['tf']
+                    active_model = trigger['model']
+                    target_csv = f"{ASSET}_{target_tf}.csv"
+                    ts = get_latest_ts(target_csv)
+                    
+                    if ts and ts != run_institutional_engine.processed_dict.get(target_tf):
                         # 🦁 INSTITUTIONAL SAFETY: Ignore old data from before market open
                         try:
-                            sig_dt = datetime.strptime(m15_ts, '%Y-%m-%d %H:%M:%S')
+                            sig_dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
                             if (datetime.now() - sig_dt).total_seconds() > 1800: # Older than 30m
-                                last_processed_ts = m15_ts
+                                run_institutional_engine.processed_dict[target_tf] = ts
                                 continue
                         except: pass
                         
                         print(f"\n{Fore.WHITE}{'='*60}")
-                        print(f" {Fore.YELLOW}🦁 GIA SIGNAL DETECTED | TS: {m15_ts} | Equity: ${equity:,.2f}")
+                        print(f" {Fore.YELLOW}🦁 GIA SIGNAL DETECTED [{trigger['name']}] | TS: {ts} | Equity: ${equity:,.2f}")
                         print(f"{Fore.WHITE}{'='*60}")
                         
                         # A. Run AI Analysis
-                        res = analyzer.analyze()
+                        res = active_model.analyze()
                         if res['success']:
                             signal = res['signal']
                             atr = res['atr']
@@ -259,6 +284,10 @@ def run_production_engine():
                             if signal in ['BUY', 'SELL'] and open_count < RiskRules.MAX_CONCURRENT_TRADES:
                                 # B. Professional Risk Calculation (Dynamic from Telegram)
                                 current_risk = telegram_service.risk
+                                # 🦁 Duo Risk Override: FLASH always 0.5%
+                                if is_duo_mode and trigger['name'] == 'FLASH':
+                                    current_risk = 0.5
+                                    
                                 current_lev = telegram_service.leverage
                                 current_guard = telegram_service.margin_guard
                                 
@@ -287,7 +316,7 @@ def run_production_engine():
                                 bridge.send_market_order(signal, lots, sl_pips, tp_pips)
 
                         # E. Clean State
-                        last_processed_ts = m15_ts
+                        run_institutional_engine.processed_dict[target_tf] = ts
                         last_check_time = time.time()
                 else:
                     # If M15 isn't updated yet, we wait and retry sync

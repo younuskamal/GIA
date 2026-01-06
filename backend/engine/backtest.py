@@ -47,7 +47,7 @@ class BacktestEngine:
         
         # 1. Setup Environment
         broker = BrokerSimulator(broker_name)
-        is_predator = "PREDATOR" in self.model_path.upper()
+        is_predator = "PREDATOR" in self.model_path.upper() or "FLASH" in self.model_path.upper()
         strategy = StrategyHandler(mode=mode, is_legacy=self.is_legacy, uhf_mode=is_predator)
         leverage = 500 # Default Gold Leverage
         

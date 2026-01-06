@@ -36,6 +36,39 @@ class MockEncoder:
 import __main__
 __main__.MockEncoder = MockEncoder
 
+def engineer_mtf(df_raw, suffix):
+    """Engineers features for secondary timeframes with appropriate suffix identification."""
+    df = df_raw.copy()
+    # Ensure EMA 200 is present for structure
+    close = df['close']
+    ema200 = close.ewm(span=200, adjust=False).mean()
+    
+    # 🦁 Technical Indicators with suffix mapping
+    df[f'rsi_{suffix}'] = calculate_rsi(close, 14)
+    df[f'macd_{suffix}'] = (close.ewm(span=12).mean() - close.ewm(span=26).mean()) / (close + 1e-9)
+    
+    ma20, std20 = close.rolling(20).mean(), close.rolling(20).std()
+    df[f'bb_width_{suffix}'] = (4 * std20) / (ma20 + 1e-9)
+    df[f'ema_200_dist_{suffix}'] = (close - ema200) / (close + 1e-9)
+    
+    # Clean-up and Keep subset
+    df = df.replace([np.inf, -np.inf], 0).fillna(0)
+    cols = ['date', f'rsi_{suffix}', f'macd_{suffix}', f'bb_width_{suffix}', f'ema_200_dist_{suffix}']
+    return df[cols]
+
+class EliteDuoEngine:
+    """Institutional Master Engine that manages PRO (M15) and FLASH (M1) models in harmony."""
+    def __init__(self, models_dir: str):
+        self.pro = GoldAnalysisModel(os.path.join(models_dir, "GIA_v2_PRO.pkl"))
+        self.flash = GoldAnalysisModel(os.path.join(models_dir, "GIA_v2_FLASH.pkl"))
+        self.strategy = self.pro.strategy # Shared strategy handler context
+        
+    def analyze_pro(self):
+        return self.pro.analyze()
+        
+    def analyze_flash(self):
+        return self.flash.analyze()
+
 class GoldAnalysisModel:
     def __init__(self, model_path: str = None):
         self.manager = ModelManager()
@@ -44,6 +77,7 @@ class GoldAnalysisModel:
         self.model_path = model_path or os.path.join(BASE_BACKEND, 'models', 'GIA_v14_PRO.pkl')
         self.last_mtime = 0
         self._load_active_model()
+        self.is_flash = "FLASH" in self.model_path.upper()
         is_predator = "PREDATOR" in self.model_path.upper()
         # Initialize Strategy in Advisor Mode (Conservative)
         self.strategy = StrategyHandler(mode=SystemMode.ADVISOR_MODE, uhf_mode=is_predator)
@@ -56,6 +90,7 @@ class GoldAnalysisModel:
                     self.model_data = joblib.load(self.model_path)
                     self.model_loaded = True
                     self.last_mtime = mtime
+                    self.is_flash = "FLASH" in self.model_path.upper()
                     print(f"🧠 AI ENGINE {'LOADED' if self.last_mtime == mtime else 'RELOADED'}: {os.path.basename(self.model_path)}")
             except Exception as e:
                 print(f"⚠️ Failed to load model: {e}")
@@ -66,45 +101,73 @@ class GoldAnalysisModel:
         """Runs the full analysis cycle with hot-reload support."""
         self._load_active_model() # Hot-reload if file changed
         if not self.model_loaded: return {"success": False, "error": "Model not loaded"}
+        
+        # 1. Get Live Features
+        features = self.get_features(interval='1m' if self.is_flash else '15m')
+        if features is None: return {"success": False, "error": "Insufficient Data"}
+
+        # 2. Predict
+        try:
+            # Ensure features match model input
+            # If FLASH, we expect features derived from M1
+            last_row = features.iloc[[-1]] 
+            prediction = self.model_data.predict(last_row)[0]
+            
+            # Probability safely
+            try:
+                probs = self.model_data.predict_proba(last_row)[0]
+                confidence = max(probs)
+            except:
+                confidence = 1.0 # Default if no proba
+            
+            # Mapping
+            label_map = {0: "WAIT", 1: "BUY", 2: "SELL"}
+            signal = label_map.get(prediction, "WAIT")
+            
+            return {
+                "success": True,
+                "signal": signal,
+                "confidence": float(confidence),
+                "timestamp": datetime.now(),
+                "price": features['close'].iloc[-1]
+            }
+        except Exception as e:
+            return {"success": False, "error": f"Inference Failed: {e}"}
 
     def get_features(self, interval='15m') -> Optional[pd.DataFrame]:
         """Calculates all professional features for live inference, supporting V2/MTF."""
         from backend.data.loaders import fetch_real_gold_data
         
         # 1. Fetch MTF Data
-        raw_m15 = fetch_real_gold_data(interval='15m')
-        raw_m30 = fetch_real_gold_data(interval='30m')
-        raw_h1 = fetch_real_gold_data(interval='1h')
-        
-        if any(r is None or len(r) < 150 for r in [raw_m15, raw_m30, raw_h1]):
-            return None
-
-        # 2. Process Base Logic
-        df_m15 = process_raw_data(raw_m15)
-        
-        # Side TFs Engineering
-        def engineer_mtf(df, suffix):
-            df = df.copy()
-            processed = process_raw_data(df)
-            df[f'rsi_{suffix}'] = processed['rsi']
-            e12, e26 = df['close'].ewm(span=12).mean(), df['close'].ewm(span=26).mean()
-            df[f'macd_{suffix}'] = (e12 - e26) / (df['close'] + 1e-6)
-            df[f'bb_width_{suffix}'] = (4 * df['close'].rolling(20).std()) / (df['close'].rolling(20).mean() + 1e-6)
+        if self.is_flash:
+            # ⚡ FLASH MODE: M1 Base, plus M15/H1 context
+            raw_base = fetch_real_gold_data(interval='1m')
+            raw_m15 = fetch_real_gold_data(interval='15m')
+            raw_h1 = fetch_real_gold_data(interval='1h')
             
-            if suffix == 'h1':
-                ema200 = df['close'].rolling(200).mean()
-                df['ema_200_dist_h1'] = (df['close'] - ema200) / (df['close'] + 1e-6)
-                df['mom_h1'] = df['close'].diff(4) / (df['close'] + 1e-6)
-                df['trend_h1'] = np.where(df['close'] > ema200, 1, -1)
-                df['rsi_h1'] = processed['rsi']
-            return df[['date'] + [c for c in df.columns if c.endswith(suffix)]]
-
-        df_m30 = engineer_mtf(raw_m30, 'm30')
-        df_h1 = engineer_mtf(raw_h1, 'h1')
-
-        # 3. Merge & Logic
-        df = pd.merge_asof(df_m15.sort_values('date'), df_m30.sort_values('date'), on='date', direction='backward')
-        df = pd.merge_asof(df, df_h1.sort_values('date'), on='date', direction='backward')
+            if any(r is None or len(r) < 150 for r in [raw_base, raw_m15, raw_h1]):
+                return None
+                
+            df_base = process_raw_data(raw_base)
+            df_m15 = engineer_mtf(raw_m15, 'm15')
+            df_h1 = engineer_mtf(raw_h1, 'h1')
+            
+            df = pd.merge_asof(df_base.sort_values('date'), df_m15.sort_values('date'), on='date', direction='backward')
+            df = pd.merge_asof(df, df_h1.sort_values('date'), on='date', direction='backward')
+        else:
+            raw_base = fetch_real_gold_data(interval='15m')
+            raw_m30 = fetch_real_gold_data(interval='30m')
+            raw_h1 = fetch_real_gold_data(interval='1h')
+            
+            if any(r is None or len(r) < 150 for r in [raw_base, raw_m30, raw_h1]):
+                return None
+                
+            df_base = process_raw_data(raw_base)
+            df_m30 = engineer_mtf(raw_m30, 'm30')
+            df_h1 = engineer_mtf(raw_h1, 'h1')
+            
+            df = pd.merge_asof(df_base.sort_values('date'), df_m30.sort_values('date'), on='date', direction='backward')
+            df = pd.merge_asof(df, df_h1.sort_values('date'), on='date', direction='backward')
         df = MarketRegimeEngine().classify(df)
         
         # 4. Final V2 Engineering (Coordinated with Training)
@@ -122,24 +185,23 @@ class GoldAnalysisModel:
         df['bb_pos'] = (close - (ma20 - 2*std20)) / (4*std20 + 1e-6)
         df['price_dist_bb'] = (close - ma20) / (ma20 + 1e-6)
         
-        for s in [9, 21, 50, 200]:
-            ma = close.rolling(s).mean()
-            df[f'ema_{s}_dist'] = (close - ma) / (ma + 1e-6)
-        df['ribbon_align'] = (np.sign(df['ema_21_dist']) + np.sign(df['ema_50_dist']) + np.sign(df.get('ema_200_dist', 0))) / 3.0
+        for s in [9, 21, 50, 100, 200]:
+            ma = close.ewm(span=s, adjust=False).mean()
+            df[f'ema_{s}_dist'] = (close - ma) / (ma + 1e-9)
+            
+        df['ribbon_align'] = (np.sign(df['ema_9_dist']) + np.sign(df['ema_21_dist']) + np.sign(df['ema_50_dist']) + np.sign(df.get('ema_100_dist', 0)) + np.sign(df['ema_200_dist'])) / 5.0
         
-        df['vol_ratio'] = (df['vol_20'] / df['vol_20'].rolling(200).mean()).fillna(1.0)
-        df['vol_regime'] = np.where(df['vol_ratio'] > 1.2, 1, 0)
-        df['atr_norm'] = df['atr'] / (close + 1e-6)
+        df['vol_ratio'] = std20 / (std20.rolling(50).mean() + 1e-9)
+        df['vol_regime'] = (std20 / (std20.rolling(200).mean() + 1e-9)).fillna(1.0)
+        df['atr_norm'] = df['atr'] / (close + 1e-9)
         
-        avg_body = (df['close'] - df['open']).abs().rolling(20).mean()
-        df['body_rel'] = (df['close'] - df['open']).abs() / (avg_body + 1e-6)
-        df['body_size'] = (df['close'] - df['open']) / (df['open'] + 1e-6)
-        df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (close + 1e-6)
-        df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (close + 1e-6)
-        df['wick_ratio'] = (df['upper_wick'] - df['lower_wick']) / (df['upper_wick'] + df['lower_wick'] + 1e-6)
+        df['body_rel'] = (close - df['open']).abs() / (df['high'] - df['low'] + 1e-9)
+        df['upper_wick'] = (df['high'] - df[['open', 'close']].max(axis=1)) / (close + 1e-9)
+        df['lower_wick'] = (df[['open', 'close']].min(axis=1) - df['low']) / (close + 1e-9)
+        df['wick_ratio'] = df['upper_wick'] / (df['lower_wick'] + 1e-9)
         
-        df['coiling'] = df['bb_width'] / (df['bb_width'].rolling(50).mean() + 1e-6)
-        df['velocity'] = close.diff(5) / (std20 + 1e-6)
+        df['coiling'] = df['bb_width'] / (df['bb_width'].rolling(50).mean() + 1e-9)
+        df['velocity'] = close.diff(5) / (std20 + 1e-9)
         
         # 🚀 Institutional High-Intelligence Features
         df['price_acceleration'] = df['velocity'].diff(3)
@@ -158,10 +220,20 @@ class GoldAnalysisModel:
         hi100 = close.rolling(100).max()
         df['structure_strength'] = (close - lo100) / (hi100 - lo100 + 1e-9)
 
-        df['hour'] = df['date'].dt.hour
-        df['is_peak'] = ((df['hour'] >= 7) & (df['hour'] <= 22)).astype(int)
-        df['is_peak_hour'] = df['is_peak']
-        df['trend_harmony'] = (np.sign(df['macd_norm']) + np.sign(df.get('macd_m30', 0)) + np.sign(df.get('macd_h1', 0))) / 3.0
+        # Session Awareness (UTC sync)
+        hour = df['date'].dt.hour
+        df['is_london'] = ((hour >= 8) & (hour <= 16)).astype(int)
+        df['is_newyork'] = ((hour >= 13) & (hour <= 21)).astype(int)
+        df['session_active'] = ((df['is_london'] == 1) | (df['is_newyork'] == 1)).astype(int)
+
+        df['trend_harmony'] = (
+            np.sign(df['macd_norm']) + 
+            np.sign(df.get('macd_m15', df.get('macd_m30', 0))) + 
+            np.sign(df.get('macd_h1', 0))
+        ) / 3.0
+        
+        # Map Regime for Model
+        df['regime_flag'] = df['regime'].map({'TRENDING': 1, 'RANGING': 0, 'VOLATILE': 2, 'STALL': -1}).fillna(0)
 
 
         df = df.replace([np.inf, -np.inf], 0).fillna(0)

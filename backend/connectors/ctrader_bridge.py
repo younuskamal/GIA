@@ -9,7 +9,7 @@ import os
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from twisted.internet import reactor
 from ctrader_open_api import Client, Protobuf, Auth, EndPoints, TcpProtocol
 from ctrader_open_api.messages.OpenApiMessages_pb2 import (
@@ -29,6 +29,7 @@ from config.secrets import (
     CTRADER_CLIENT_ID, CTRADER_SECRET, CTRADER_ACCESS_TOKEN, 
     CTRADER_ACCOUNT_ID, CTRADER_ENV
 )
+from services.telegram_service import telegram_service
 
 # Setup Logger
 logger = logging.getLogger("cTraderBridge")
@@ -63,6 +64,7 @@ class CTraderBridge:
         self.latest_ask = None
         self.pending_sl_tp = {} # Track pending SL/TP by clientMsgId or logic
         self.data_cache = {} # TF -> Candles
+        self.last_notified_connected = False
         
         # 🦁 Project-Centric Path Mapping
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -98,6 +100,9 @@ class CTraderBridge:
         self.connected = False
         self.authorized = False
         self.ready_event.clear()
+        if self.last_notified_connected:
+            telegram_service.notify_connection_status(False)
+            self.last_notified_connected = False
 
     def _on_message(self, client, message):
         # In this library version, 'message' is often the actual parsed payload 
@@ -174,6 +179,9 @@ class CTraderBridge:
                     if self.auth_stage == 4:
                         self.auth_stage = 5
                         self.ready_event.set()
+                        if not self.last_notified_connected:
+                            telegram_service.notify_connection_status(True)
+                            self.last_notified_connected = True
             except: pass
 
         # Error Response
@@ -185,9 +193,16 @@ class CTraderBridge:
         elif msg_type == Protobuf._names["ProtoOASpotEvent"]:
             payload = Protobuf.extract(message)
             if payload.symbolId == self.symbol_id:
-                # cTrader OpenAPI standard: prices are always shifted by 10^5
-                if hasattr(payload, 'bid'): self.latest_bid = payload.bid / 100000.0
-                if hasattr(payload, 'ask'): self.latest_ask = payload.ask / 100000.0
+                if hasattr(payload, 'bid'): 
+                    new_bid = payload.bid / 100000.0
+                    if self.latest_bid is None:
+                        logger.info(f"First Ticket Received: Bid={new_bid}")
+                    self.latest_bid = new_bid
+                if hasattr(payload, 'ask'): 
+                    new_ask = payload.ask / 100000.0
+                    if self.latest_ask is None:
+                        logger.info(f"First Ticket Received: Ask={new_ask}")
+                    self.latest_ask = new_ask
 
         # Reconcile Response (Positions) (2125)
         elif msg_type == Protobuf._names["ProtoOAReconcileRes"]:
@@ -244,9 +259,22 @@ class CTraderBridge:
                                              positionId=pos_id,
                                              stopLoss=final_sl,
                                              takeProfit=final_tp)
+                            
+                            # Notify Telegram on Open
+                            direction = self.pending_sl_tp.get('direction', 'N/A')
+                            lots = (pos.quantity / 10000.0) if pos else 0
+                            entry_price = (pos.entryPrice / 100000.0) if pos else 0
+                            telegram_service.notify_trade_open(direction, lots, entry_price, final_sl or 0, final_tp or 0)
+
                         self.pending_sl_tp = {} 
                 
                 logger.info(f"EXEC: Order Filled. Position ID: {pos_id if pos else 'N/A'}")
+            
+            elif exec_type in [4, 5, 6]: # POSITION_CLOSED or similar
+                pos = getattr(payload, 'position', None)
+                if pos:
+                    pnl = (payload.grossProfit / 100.0) if hasattr(payload, 'grossProfit') else 0
+                    telegram_service.notify_trade_close(pos.positionId, pnl, reason="Closed/Stop-out")
             
         # Order Error Event (2132)
         elif msg_type == Protobuf._names["ProtoOAOrderErrorEvent"]:
@@ -289,7 +317,8 @@ class CTraderBridge:
                 ts_ms = ts_min * 60 * 1000
                 o, h, l, c = [p / 100000.0 for p in [o_raw, h_raw, l_raw, c_raw]]
                 
-                dt_str = datetime.fromtimestamp(ts_ms/1000.0).strftime('%Y-%m-%d %H:%M:%S')
+                dt = datetime.fromtimestamp(ts_ms/1000.0) + timedelta(hours=3)
+                dt_str = dt.strftime('%Y-%m-%d %H:%M:%S')
                 bars.append(f"{dt_str},{o:.2f},{h:.2f},{l:.2f},{c:.2f},{v}")
             
             if tf_label != "UNKNOWN":

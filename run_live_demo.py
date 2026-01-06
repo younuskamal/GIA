@@ -30,6 +30,7 @@ from backend.engine.consensus import TripleConsensusModel
 from backend.engine.inference import GoldAnalysisModel
 from backend.connectors.ctrader_bridge import CTraderBridge
 from backend.core.rules import RiskRules
+from backend.services.telegram_service import telegram_service
 
 # 🦁 INSTITUTIONAL LOCK: Production Parameters
 # 🦁 Project-Centric Path Mapping
@@ -96,40 +97,49 @@ def run_production_engine():
     if args.model_idx:
         choice = args.model_idx.upper()
         USER_RISK = args.risk if args.risk is not None else 0.5
-        LEVERAGE = args.lev if args.lev is not None else 500
-        MARGIN_GUARD = args.guard if args.guard is not None else 100
-    else:
-        print(f"\n {Fore.YELLOW}STEP 1: SELECT EXECUTION MODE{Style.RESET_ALL}")
-        for i, m in enumerate(all_models):
-            label = "[PRO]" if "SIGNAL_PRO" in m else "[CORE]"
-            print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {label}")
-        print(f"  [{Fore.GREEN}C{Style.RESET_ALL}] TRIPLE CONSENSUS (v14 + v2_PRO + v2_FLASH)")
+        LEVERAGE = args.lev if args.lev is not None else 100
+        MARGIN_GUARD = args.guard if args.guard is not None else 80
+        is_consensus = (choice == 'C')
         
-        choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
+        # Sync to Telegram for dynamic control
+        telegram_service.risk = USER_RISK
+        telegram_service.leverage = LEVERAGE
+        telegram_service.margin_guard = MARGIN_GUARD
+    else:
+        print(f"{Fore.RED}❌ ERROR: No Model Selected. Use --model_idx [Index or C]{Style.RESET_ALL}")
+        return
+    
+    # The following interactive selection block is removed as per the instruction to only allow --model_idx
+    # for i, m in enumerate(all_models):
+    #     label = "[PRO]" if "SIGNAL_PRO" in m else "[CORE]"
+    #     print(f"  [{Fore.GREEN}{i+1}{Style.RESET_ALL}] {m:<25} {label}")
+    # print(f"  [{Fore.GREEN}C{Style.RESET_ALL}] TRIPLE CONSENSUS (v14 + v2_PRO + v2_FLASH)")
+    
+    # choice = input(f"\n {Fore.WHITE}Enter Selection > {Style.RESET_ALL}").strip().upper()
 
-        print(f"\n {Fore.YELLOW}STEP 2: RISK & MARGIN PARAMETERS{Style.RESET_ALL}")
-        try:
-            risk_input = input(f"  [1] Dynamic Risk % per trade (0.1 to 2.0) [Default 0.5] > ").strip()
-            USER_RISK = float(risk_input) if risk_input else 0.5
-            
-            leverage_input = input(f"  [2] Account Leverage [Default 500] > ").strip()
-            LEVERAGE = int(leverage_input) if leverage_input else 500
-            
-            margin_input = input(f"  [3] Margin Guard % (Safety Buffer) [Default 100] > ").strip()
-            MARGIN_GUARD = int(margin_input) if margin_input else 100
-        except ValueError:
-            print(f"{Fore.RED}⚠️ Invalid numeric input. Reverting to Defaults: Risk 0.5%, Leverage 500, Margin 100%{Style.RESET_ALL}")
-            USER_RISK, LEVERAGE, MARGIN_GUARD = 0.5, 500, 100
+    # print(f"\n {Fore.YELLOW}STEP 2: RISK & MARGIN PARAMETERS{Style.RESET_ALL}")
+    # try:
+    #     risk_input = input(f"  [1] Dynamic Risk % per trade (0.1 to 2.0) [Default 0.5] > ").strip()
+    #     USER_RISK = float(risk_input) if risk_input else 0.5
+        
+    #     leverage_input = input(f"  [2] Account Leverage [Default 500] > ").strip()
+    #     LEVERAGE = int(leverage_input) if leverage_input else 500
+        
+    #     margin_input = input(f"  [3] Margin Guard % (Safety Buffer) [Default 100] > ").strip()
+    #     MARGIN_GUARD = int(margin_input) if margin_input else 100
+    # except ValueError:
+    #     print(f"{Fore.RED}⚠️ Invalid numeric input. Reverting to Defaults: Risk 0.5%, Leverage 500, Margin 100%{Style.RESET_ALL}")
+    #     USER_RISK, LEVERAGE, MARGIN_GUARD = 0.5, 500, 100
 
     print(f" {Fore.GREEN}✅ Production Config Locked: Risk {USER_RISK}% | Lev 1:{LEVERAGE} | Guard {MARGIN_GUARD}%{Style.RESET_ALL}")
     
     # 3. Initialize Analysis Engine
     analyzer = None
-    is_consensus = False
+    # is_consensus is already set above
     
     if choice == 'C':
         analyzer = TripleConsensusModel(models_main_dir)
-        is_consensus = True
+        # is_consensus = True # Already set
     elif choice.isdigit() and 1 <= int(choice) <= len(all_models):
         m_name = all_models[int(choice)-1]
         analyzer = GoldAnalysisModel(model_path=model_paths[m_name])
@@ -139,14 +149,24 @@ def run_production_engine():
 
     # 4. Connect to cTrader Bridge
     bridge = CTraderBridge(active_strategy_handler=analyzer.strategy if hasattr(analyzer, 'strategy') else None) 
+
+    # Start Telegram Listener early for responsiveness
+    telegram_service.bridge_ref = bridge # Link bridge for status reporting
+    telegram_service.start_listener()
+    telegram_service.broadcast("🚀 <b>GIA Institutional Engine Starting...</b>", include_keyboard=True)
+
     if not bridge.connect():
         print(f"{Fore.RED}❌ FAILED: cTrader OpenAPI Connection Refused. Ensure Proxy/Terminal is running.{Style.RESET_ALL}")
+        telegram_service.notify_emergency("cTrader Connection Refused")
         return
+    
+    telegram_service.broadcast("✅ <b>GIA Connected & Authorized. Monitoring Market...</b>")
 
     # State
     last_processed_ts = get_latest_ts(f"{ASSET}_M15.csv")
     last_check_time = time.time()
     last_sync_time = 0
+    last_daily_report_day = datetime.now().day
     
     mode_name = "TRIPLE CONSENSUS" if is_consensus else os.path.basename(analyzer.model_path)
     print(f"\n{Fore.GREEN}🟢 GIA INSTITUTIONAL LIVE [{mode_name}] ACTIVE.{Style.RESET_ALL}")
@@ -166,7 +186,9 @@ def run_production_engine():
                     print(f"\n{Fore.RED}⚠️ CONNECTION LOST! Attempting Self-Healing Reconnect...{Style.RESET_ALL}")
                     if bridge.connect():
                         print(f"{Fore.GREEN}✅ RECONNECTED SUCCESSFULLY.{Style.RESET_ALL}")
+                        telegram_service.notify_connection_status(True)
                     else:
+                        telegram_service.notify_emergency("Connection Lost - Reconnect Failed")
                         time.sleep(5)
                         continue
 
@@ -183,6 +205,24 @@ def run_production_engine():
                     sys.stdout.write("\n")
                     bridge.fetch_live_data()
                     last_sync_time = time.time()
+                    
+                    # 🔔 PRE-ALERT SYSTEM (At minute 13, 28, 43, 58)
+                    if now.minute % 15 == 13 and now.second < 15:
+                        # Quick peek analysis
+                        try:
+                            # We force a quick analysis on current partial data
+                            res = analyzer.analyze() 
+                            if res['success'] and res['signal'] in ['BUY', 'SELL'] and res.get('confidence', 0) > 65:
+                                telegram_service.notify_pre_alert(
+                                    res['signal'], 
+                                    f"تكوين نموذج {res['signal']} قوي", 
+                                    res.get('confidence', 0)
+                                )
+                                logging.info(f"🔔 Pre-Alert Sent: {res['signal']}")
+                                time.sleep(15) # Prevent spam
+                        except Exception as e:
+                            logging.error(f"Pre-Alert Check Failed: {e}")
+
                     # Trigger only at start of 15-min candle (with 5s safety buffer)
                     if now.minute % 15 == 0 and 5 <= now.second <= 25:
                         trigger_detected = True
@@ -212,10 +252,17 @@ def run_production_engine():
                             
                             print(f"   📜 ANALYTICS: {Fore.CYAN}{expl}{Style.RESET_ALL}")
                             logging.info(f"Signal: {signal} | ATR: {atr} | Expl: {expl}")
+                            
+                            # Notify Telegram on Signal
+                            telegram_service.notify_signal_detection(signal, expl, res.get('confidence', 0))
 
                             if signal in ['BUY', 'SELL'] and open_count < RiskRules.MAX_CONCURRENT_TRADES:
-                                # B. Professional Risk Calculation
-                                risk_usd = equity * (USER_RISK / 100.0) * size_mult
+                                # B. Professional Risk Calculation (Dynamic from Telegram)
+                                current_risk = telegram_service.risk
+                                current_lev = telegram_service.leverage
+                                current_guard = telegram_service.margin_guard
+                                
+                                risk_usd = equity * (current_risk / 100.0) * size_mult
                                 sl_val = atr * 2.0
                                 tp_val = atr * 3.5
                                 sl_pips, tp_pips = sl_val * 10, tp_val * 10
@@ -224,10 +271,16 @@ def run_production_engine():
                                 # C. Margin Check
                                 price = bridge.latest_ask if signal == 'BUY' else bridge.latest_bid
                                 if price:
-                                    margin_req = (price * lots * 100) / LEVERAGE
-                                    if equity < (margin_req * (MARGIN_GUARD / 100.0 + 0.5)):
+                                    margin_req = (price * lots * 100) / current_lev
+                                    if equity < (margin_req * (current_guard / 100.0 + 0.5)):
                                         print(f"   {Fore.RED}⚠️ MARGIN GUARD REJECT: Too risky for current equity.{Style.RESET_ALL}")
+                                        telegram_service.notify_emergency(f"Margin Reject: {signal} {lots}L rejected by Guard.")
                                         continue
+
+                                # Check if trading is enabled via Telegram
+                                if not telegram_service.trading_enabled:
+                                    print(f"   {Fore.YELLOW}⏸️ TRADE SKIPPED: Trading is currently DISABLED via Telegram.{Style.RESET_ALL}")
+                                    continue
 
                                 # D. Order Transmission
                                 print(f"   🎯 EXECUTION: {signal} {lots} Lots | SL: {round(sl_pips,1)} | TP: {round(tp_pips,1)}")
@@ -254,20 +307,41 @@ def run_production_engine():
                 sys.stdout.write(dashboard)
                 sys.stdout.flush()
                 
-                if time.time() - last_check_time > 1800: # 30 min stall
-                    logging.warning("System Stall Detect: No CSV update in 30 mins.")
-                    last_check_time = time.time()
+                if time.time() - last_sync_time > 1800: # 30 min stall check based on sync attempt
+                    # Only warn if connected but no data
+                    if bridge.authorized:
+                        logging.warning("System Stall Detect: No Sync in 30 mins.")
+                        # telegram_service.notify_emergency("System Stall: No data update for 30 mins") # Slienced for now as it might be false positive if market is closed or slow
+                    last_sync_time = time.time() # Reset to avoid spam
+
+                # Daily Report (at 23:55 or if day changed)
+                if now.day != last_daily_report_day and now.hour == 23 and now.minute >= 55:
+                    # Generic daily report for now, actual PNL should be tracked from positions or bridge
+                    telegram_service.send_daily_report(0.0, 0, 0.0) # Placeholder
+                    last_daily_report_day = now.day
 
                 time.sleep(1)
 
             except Exception as e:
-                print(f"\n{Fore.RED}💥 CRITICAL INTERNAL ERROR: {str(e)}{Style.RESET_ALL}")
-                logging.error(f"Internal Loop Error: {str(e)}")
-                time.sleep(5) # Cooldown before retry
+                err_msg = f"Internal Loop Error: {str(e)}"
+                print(f"{Fore.RED}❌ {err_msg}{Style.RESET_ALL}")
+                logging.error(err_msg)
+                telegram_service.notify_emergency(err_msg)
+                time.sleep(10)
 
     except KeyboardInterrupt:
-        print(f"\n{Fore.RED}🛑 Manual Shutdown Initiated.{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}⏹️ SHUTTING DOWN MANUALLY...{Style.RESET_ALL}")
+        telegram_service.broadcast("⚠️ <b>GIA System: Manual Shutdown</b>")
+    except Exception as e:
+        err_msg = f"CRITICAL SYSTEM FAILURE: {str(e)}"
+        print(f"{Fore.RED}💥 {err_msg}{Style.RESET_ALL}")
+        logging.critical(err_msg)
+        telegram_service.notify_emergency(err_msg)
+    finally:
         bridge.shutdown()
+        print("💡 Finalizing Institutional Context...")
+        time.sleep(1)
+        print("✅ DONE.")
 
 if __name__ == "__main__":
     try:

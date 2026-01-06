@@ -49,7 +49,9 @@ class GIA_v2_Flash_M1_Trainer:
             'atr_norm', 'vol_ratio', 'price_dist_bb', 'coiling', 'velocity',
             'trend_harmony', 'wick_ratio', 'vol_regime', 'ribbon_align',
             'price_acceleration', 'liquidity_shock', 'market_entropy', 'exhaustion_index',
-            'is_london', 'is_newyork', 'session_active'
+            'is_london', 'is_newyork', 'session_active',
+            # --- UT BOT STRATEGY ---
+            'ut_bot_signal', 'ut_bot_dist'
         ]
         
         self.models_dir = os.path.join(PROJECT_ROOT, 'backend', 'models')
@@ -115,6 +117,55 @@ class GIA_v2_Flash_M1_Trainer:
         l_pc = (df['low'] - df['close'].shift()).abs()
         tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
         return tr.rolling(period).mean()
+
+    def _calc_ut_bot(self, df, sensitivity=1, period=10):
+        # UT Bot Logic (Pine Script Port)
+        src = df['close'].values
+        # Local ATR calc for UT Bot
+        h_l = df['high'] - df['low']
+        h_pc = (df['high'] - df['close'].shift()).abs()
+        l_pc = (df['low'] - df['close'].shift()).abs()
+        tr = pd.concat([h_l, h_pc, l_pc], axis=1).max(axis=1)
+        xATR = tr.rolling(period).mean().values
+        nLoss = sensitivity * xATR
+        
+        n = len(df)
+        xATRTrailingStop = np.zeros(n)
+        pos = np.zeros(n)
+        
+        # Determine first valid index to avoid nan issues
+        start_idx = period
+        xATRTrailingStop[:start_idx] = src[:start_idx]
+        
+        for i in range(start_idx, n):
+            prev_stop = xATRTrailingStop[i-1]
+            cur_src = src[i]
+            prev_src = src[i-1]
+            cur_nLoss = nLoss[i]
+            
+            if np.isnan(cur_nLoss): 
+                 xATRTrailingStop[i] = cur_src
+                 continue
+
+            if (cur_src > prev_stop) and (prev_src > prev_stop):
+                xATRTrailingStop[i] = max(prev_stop, cur_src - cur_nLoss)
+            elif (cur_src < prev_stop) and (prev_src < prev_stop):
+                xATRTrailingStop[i] = min(prev_stop, cur_src + cur_nLoss)
+            elif (cur_src > prev_stop):
+                xATRTrailingStop[i] = cur_src - cur_nLoss
+            else:
+                xATRTrailingStop[i] = cur_src + cur_nLoss
+            
+            prev_stop_val = xATRTrailingStop[i-1] 
+            
+            if (prev_src < prev_stop_val) and (cur_src > prev_stop_val):
+                pos[i] = 1
+            elif (prev_src > prev_stop_val) and (cur_src < prev_stop_val):
+                pos[i] = -1
+            else:
+                pos[i] = pos[i-1]
+        
+        return xATRTrailingStop, pos
 
     def engineer_primary(self, df):
         df = df.copy()
@@ -183,6 +234,14 @@ class GIA_v2_Flash_M1_Trainer:
         re = MarketRegimeEngine()
         df = re.classify(df)
         df['regime_flag'] = df['regime'].map({'TRENDING': 1, 'RANGING': 0, 'VOLATILE': 2, 'STALL': -1}).fillna(0)
+
+        # 🤖 UT Bot Integration
+        ut_stop, ut_pos = self._calc_ut_bot(df, sensitivity=1, period=10)
+        df['ut_bot_pos'] = ut_pos
+        df['ut_bot_dist'] = (df['close'] - ut_stop) / (df['close'] + 1e-9)
+        # Signal: 1 (Buy), -1 (Sell), 0 (Hold) based on pos switch
+        # Actually use the pos state itself as a strong feature
+        df['ut_bot_signal'] = df['ut_bot_pos']
         
         df = df.replace([np.inf, -np.inf], np.nan)
         return df.dropna()

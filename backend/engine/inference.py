@@ -38,6 +38,7 @@ __main__.MockEncoder = MockEncoder
 
 def engineer_mtf(df_raw, suffix):
     """Engineers features for secondary timeframes with appropriate suffix identification."""
+    from backend.core.regime import MarketRegimeEngine
     df = df_raw.copy()
     # Ensure EMA 200 is present for structure
     close = df['close']
@@ -46,14 +47,19 @@ def engineer_mtf(df_raw, suffix):
     # 🦁 Technical Indicators with suffix mapping
     df[f'rsi_{suffix}'] = calculate_rsi(close, 14)
     df[f'macd_{suffix}'] = (close.ewm(span=12).mean() - close.ewm(span=26).mean()) / (close + 1e-9)
+    df[f'mom_{suffix}'] = close.pct_change(5)
     
     ma20, std20 = close.rolling(20).mean(), close.rolling(20).std()
     df[f'bb_width_{suffix}'] = (4 * std20) / (ma20 + 1e-9)
     df[f'ema_200_dist_{suffix}'] = (close - ema200) / (close + 1e-9)
     
+    # 🕵️ Trend Awareness
+    regime_df = MarketRegimeEngine().classify(df)
+    df[f'trend_{suffix}'] = regime_df['regime_flag']
+    
     # Clean-up and Keep subset
     df = df.replace([np.inf, -np.inf], 0).fillna(0)
-    cols = ['date', f'rsi_{suffix}', f'macd_{suffix}', f'bb_width_{suffix}', f'ema_200_dist_{suffix}']
+    cols = ['date', f'rsi_{suffix}', f'macd_{suffix}', f'bb_width_{suffix}', f'ema_200_dist_{suffix}', f'mom_{suffix}', f'trend_{suffix}']
     return df[cols]
 
 class EliteDuoEngine:
@@ -129,7 +135,11 @@ class GoldAnalysisModel:
                 "signal": signal,
                 "confidence": float(confidence),
                 "timestamp": datetime.now(),
-                "price": features['close'].iloc[-1]
+                "price": features['close'].iloc[-1],
+                "atr": float(features['atr'].iloc[-1]), # Needed for SL/TP
+                "rsi": float(features['rsi'].iloc[-1]), # Added for Telegram Vision
+                "vol_regime": float(features.get('vol_regime', 1.0).iloc[-1]), # Added for Vision
+                "news_safe": True # Placeholder linked to external guard
             }
         except Exception as e:
             return {"success": False, "error": f"Inference Failed: {e}"}
@@ -152,8 +162,12 @@ class GoldAnalysisModel:
             df_m15 = engineer_mtf(raw_m15, 'm15')
             df_h1 = engineer_mtf(raw_h1, 'h1')
             
+            print(f"   📊 DEBUG: Base: {len(df_base)}, M15: {len(df_m15)}, H1: {len(df_h1)}") # DEBUG
+            
             df = pd.merge_asof(df_base.sort_values('date'), df_m15.sort_values('date'), on='date', direction='backward')
             df = pd.merge_asof(df, df_h1.sort_values('date'), on='date', direction='backward')
+            
+            print(f"   📊 DEBUG: Merged Size: {len(df)}") # DEBUG
         else:
             raw_base = fetch_real_gold_data(interval='15m')
             raw_m30 = fetch_real_gold_data(interval='30m')
@@ -237,6 +251,7 @@ class GoldAnalysisModel:
 
 
         df = df.replace([np.inf, -np.inf], 0).fillna(0)
+        print(f"   📊 FEATURE ENGINEERING: Result Size {len(df)} rows | Columns: {len(df.columns)}")
         return df.tail(10)
         
     def analyze_market(self, df: pd.DataFrame) -> Dict:
@@ -309,7 +324,17 @@ class GoldAnalysisModel:
         atr_val = df_full['atr'].iloc[-1] if 'atr' in df_full.columns else 0.0
         # News impact is optional
         news_score = df_full['news_impact_score'].iloc[-1] if 'news_impact_score' in df_full.columns else 0
-        ctx = {"news_impact_score": news_score}
+        regime_flag = int(df_full['regime_flag'].iloc[-1]) if 'regime_flag' in df_full.columns else 0
+        ctx = {
+            "news_impact_score": news_score,
+            "date": df_full['date'].iloc[-1] if 'date' in df_full.columns else None,
+            "regime_flag": regime_flag,
+            "market_entropy": float(df_full['market_entropy'].iloc[-1]) if 'market_entropy' in df_full.columns else 0.5,
+            "exhaustion_index": float(df_full['exhaustion_index'].iloc[-1]) if 'exhaustion_index' in df_full.columns else 0.0,
+            "atr": float(atr_val),
+            # Use BB width as a loose proxy for transaction cost pressure if live spread is unavailable
+            "spread": float(df_full['bb_width'].iloc[-1]) if 'bb_width' in df_full.columns else 0.0
+        }
         
         # Decision via StrategyHandler
         decision_pkg = self.strategy.apply_strategy(raw_signal, confidence, ctx)
@@ -319,7 +344,10 @@ class GoldAnalysisModel:
             "signal": decision_pkg['signal'],
             "confidence": confidence,
             "raw_prediction": raw_signal,
-            "atr": atr_val,
+            "atr": float(atr_val),
+            "regime_flag": regime_flag,
+            "market_entropy": ctx["market_entropy"],
+            "exhaustion_index": ctx["exhaustion_index"],
             "timestamp": df_full['date'].iloc[-1],
             "explanation": decision_pkg['explanation']
         }

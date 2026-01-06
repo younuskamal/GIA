@@ -24,6 +24,7 @@ SUBSCRIBERS_FILE = os.path.join(os.path.dirname(BASE_DIR), "GIA_SIGNAL_PRO", "da
 
 # Ensure the data directory exists
 os.makedirs(os.path.dirname(SUBSCRIBERS_FILE), exist_ok=True)
+STATE_FILE = os.path.join(os.path.dirname(BASE_DIR), "GIA_SIGNAL_PRO", "data", "bot_state.json")
 
 class TelegramService:
     """
@@ -43,6 +44,28 @@ class TelegramService:
         self.leverage = 100
         self.margin_guard = 80
         self.message_history = {} # chat_id -> list of message_ids to cleanup
+        self.active_model_name = "Unknown" # Tracking active model name
+        
+        # 🟢 Real-time Analysis State
+        self.latest_analysis = {
+            "signal": "WAIT",
+            "confidence": 0.0,
+            "rsi_status": "Calculating...",
+            "vol_status": "Calculating...",
+            "news_status": "Safe",
+            "sentiment": "Neutral",
+            "timestamp": datetime.now()
+        }
+        # Alert throttling to reduce spam
+        self.last_signal_alert = {"ts": 0, "direction": None, "confidence": 0.0}
+        self.signal_cooldown_sec = 600  # 10 minutes between identical alerts
+        self.min_signal_conf_pct = 55.0 # Don't send alerts below this confidence %
+        
+        self.analyzer_ref = None # Reference to the Analysis Engine
+        self.daily_trades = [] # List of (profit, timestamp) for today
+        
+        # Load persistent state if exists
+        self._load_state()
         
         if not self.bot_token:
             logging.error("❌ Telegram Bot Token is missing! Notifications will not work.")
@@ -64,6 +87,41 @@ class TelegramService:
         except Exception as e:
             logging.error(f"Error saving subscribers: {e}")
 
+    def _load_state(self):
+        if os.path.exists(STATE_FILE):
+            try:
+                with open(STATE_FILE, 'r') as f:
+                    state = json.load(f)
+                    self.trading_enabled = state.get('trading_enabled', True)
+                    self.risk = state.get('risk', 0.5)
+                    self.leverage = state.get('leverage', 100)
+                    
+                    # Convert saved trade times back to datetime objects
+                    raw_trades = state.get('daily_trades', [])
+                    for t in raw_trades:
+                        try:
+                            t['time'] = datetime.fromisoformat(t['time'])
+                            self.daily_trades.append(t)
+                        except: pass
+            except Exception as e:
+                logging.error(f"Error loading state: {e}")
+
+    def _save_state(self):
+        try:
+            state = {
+                'trading_enabled': self.trading_enabled,
+                'risk': self.risk,
+                'leverage': self.leverage,
+                'daily_trades': [
+                    {'pnl': t['pnl'], 'time': t['time'].isoformat() if isinstance(t['time'], datetime) else t['time']}
+                    for t in self.daily_trades[-100:] # Keep last 100 trades
+                ]
+            }
+            with open(STATE_FILE, 'w') as f:
+                json.dump(state, f)
+        except Exception as e:
+            logging.error(f"Error saving state: {e}")
+
     def start_listener(self):
         """Starts the background listener for commands and interactivity."""
         if not self.bot_token: return
@@ -71,28 +129,37 @@ class TelegramService:
         logging.info("📡 GIA Control Center: Telegram Listener Active.")
 
     def _get_control_keyboard(self):
-        """Returns the main Arabic control keyboard."""
-        status_btn = "🛑 إيقاف التداول" if self.trading_enabled else "🟢 تشغيل التداول"
+        """Returns the premium grouped control keyboard."""
+        status_btn = "🛑 إيقاف التشغيل" if self.trading_enabled else "🟢 تفعيل التداول"
         
         keyboard = {
             "inline_keyboard": [
                 [{"text": status_btn, "callback_data": "toggle_trading"}],
                 [
-                    {"text": "📊 حالة النظام", "callback_data": "get_status"},
-                    {"text": "💰 تقرير اليوم", "callback_data": "get_report"}
+                    {"text": "📊 الحالة العامة", "callback_data": "get_status"},
+                    {"text": "🧠 رؤية الذكاء", "callback_data": "get_ai_vision"}
                 ],
                 [
-                    {"text": f"⚖️ مخاطرة: {self.risk}%", "callback_data": "set_risk_menu"},
-                    {"text": f"🚀 رافعة: 1:{self.leverage}", "callback_data": "set_lev_menu"}
+                    {"text": f"⚖️ المخاطرة: {self.risk}%", "callback_data": "set_risk_menu"},
+                    {"text": f"🚀 الرافعة: 1:{self.leverage}", "callback_data": "set_lev_menu"}
                 ],
-                [{"text": "🖥️ مراقبة الشاشة الحية", "callback_data": "view_terminal"}],
                 [
-                    {"text": "🔄 تحديث البيانات", "callback_data": "sync_now"},
-                    {"text": "🧹 تنظيف الشاشة", "callback_data": "clear_chat"}
-                ]
+                    {"text": "💰 الصفقات", "callback_data": "get_trades_info"},
+                    {"text": "📈 التقرير", "callback_data": "get_report"}
+                ],
+                [
+                    {"text": "🖥️ التيرمنال", "callback_data": "view_terminal"},
+                    {"text": "🔄 تحديث", "callback_data": "update_dashboard"}
+                ],
+                [{"text": "🧹 تنظيف وحذف السجل", "callback_data": "clear_chat"}]
             ]
         }
         return json.dumps(keyboard)
+
+    def _get_trades_keyboard(self):
+        return json.dumps({
+            "inline_keyboard": [[{"text": "🔙 العودة للقائمة", "callback_data": "main_menu"}]]
+        })
 
     def _get_risk_keyboard(self):
         keyboard = {
@@ -185,6 +252,7 @@ class TelegramService:
 
         if data == "toggle_trading":
             self.trading_enabled = not self.trading_enabled
+            self._save_state()
             status_text = "✅ تم تشغيل التداول بنجاح" if self.trading_enabled else "🛑 تم إيقاف التداول مؤقتاً"
             self._update_message(chat_id, message_id, f"<b>{status_text}</b>", use_main_kbd=True)
             logging.info(f"Trading Toggle: {self.trading_enabled}")
@@ -193,7 +261,7 @@ class TelegramService:
             self._handle_status_request(chat_id, message_id)
             
         elif data == "get_report":
-            self.send_daily_report(0.0, 0, 0.0)
+            self.send_daily_report()
 
         elif data == "sync_now":
             if self.bridge_ref:
@@ -214,9 +282,14 @@ class TelegramService:
                     "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
                     "✅ تم تحديث كاش البيانات بنجاح."
                 )
-                self._update_message(chat_id, message_id, sync_msg, use_main_kbd=True)
-            else:
-                self._update_message(chat_id, message_id, "⚠️ النظام غير متصل بالجسر حالياً.", use_main_kbd=True)
+        elif data == "update_dashboard":
+            self.send_control_panel(chat_id, message_id)
+
+        elif data == "get_trades_info":
+            self._handle_trades_info(chat_id, message_id)
+
+        elif data == "get_ai_vision":
+            self._handle_ai_vision(chat_id, message_id)
 
         elif data == "view_terminal":
             self._handle_terminal_request(chat_id, message_id)
@@ -247,6 +320,7 @@ class TelegramService:
         elif data.startswith("set_risk_"):
             new_risk = float(data.replace("set_risk_", ""))
             self.risk = new_risk
+            self._save_state()
             self._update_message(chat_id, message_id, f"✅ <b>تم ضبط المخاطرة على {new_risk}%</b>", use_main_kbd=True)
             logging.info(f"Risk Updated: {new_risk}%")
 
@@ -256,6 +330,7 @@ class TelegramService:
         elif data.startswith("set_lev_"):
             new_lev = int(data.replace("set_lev_", ""))
             self.leverage = new_lev
+            self._save_state()
             self._update_message(chat_id, message_id, f"✅ <b>تم ضبط الرافعة على 1:{new_lev}</b>", use_main_kbd=True)
             logging.info(f"Leverage Updated: 1:{new_lev}")
 
@@ -352,25 +427,117 @@ class TelegramService:
         except Exception as e:
             logging.error(f"Error updating message: {e}")
 
+    def _handle_trades_info(self, chat_id, message_id):
+        pos_count = len(self.bridge_ref.open_positions) if self.bridge_ref else 0
+        details = "📝 <b>تفاصيل الصفقات الحالية:</b>\n⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+        if pos_count > 0:
+            for p in self.bridge_ref.open_positions:
+                side = "🔵 شراء" if getattr(p.tradeData, 'tradeSide', 1) == 1 else "🔴 بيع"
+                raw_vol = getattr(p.tradeData, 'volume', 0) if hasattr(p, 'tradeData') else getattr(p, 'volume', 0)
+                lots = raw_vol / 10000.0
+                pnl = p.grossProfit / 100.0 if hasattr(p, 'grossProfit') else 0.0
+                price = p.entryPrice / 100000.0
+                details += f"• {side} | {lots}L | ${price:.2f}\n  💰 الربح: <code>{pnl:+.2f}$</code>\n"
+        else:
+            details += "<i>لا توجد صفقات مفتوحة حالياً.</i>"
+        
+        self._update_message(chat_id, message_id, details, use_main_kbd=True)
+
+    def update_market_status(self, signal, confidence, rsi, vol_regime, news_safe):
+        """Updates the internal state with LATEST REAL data from the engine."""
+        sentiment_map = {
+            "BUY": "صعودي (Bullish) 🟢", 
+            "SELL": "هبوطي (Bearish) 🔴", 
+            "WAIT": "تذبذب / محايد ⚪"
+        }
+        
+        # Derive human-readable statuses
+        rsi_st = "🟢 مثالي" if 40 <= rsi <= 60 else ("🔴 تشبع شرائي" if rsi > 70 else "🔴 تشبع بيعي" if rsi < 30 else "🟡 متوسط")
+        vol_st = "🟢 مستقر" if vol_regime < 1.0 else "⚠️ مرتفع"
+        news_st = "🟢 آمن" if news_safe else "🔴 خطر أخبار"
+        
+        self.latest_analysis = {
+            "signal": signal,
+            "confidence": confidence,
+            "rsi_status": rsi_st,
+            "vol_status": vol_st,
+            "news_status": news_st,
+            "sentiment": sentiment_map.get(signal, "غير محدد"),
+            "timestamp": datetime.now()
+        }
+
+    def _handle_ai_vision(self, chat_id, message_id):
+        """Shows REAL internal AI metrics from the latest analysis cycle."""
+        la = self.latest_analysis
+        age = (datetime.now() - la['timestamp']).seconds
+        freshness = f"(منذ {age}ث)" if age < 120 else "⚠️ (بيانات قديمة)"
+        
+        # Determine sentiment emoji
+        sent_text = la['sentiment']
+        # Map sentiment text to Arabic if needed, or keep as is if already mapped
+        
+        vision_msg = (
+            "🧠 <b>رؤية الذكاء الاصطناعي - GIA Vision</b>\n"
+            "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🤖 <b>الموديل:</b> <code>{self.active_model_name}</code>\n"
+            f"📈 <b>توقعات السوق:</b> <code>{sent_text}</code>\n"
+            f"🎯 <b>الثقة:</b> <code>{la['confidence']*100:.1f}%</code> {freshness}\n"
+            "⚖️ <b>حالة المؤشرات الحيوية:</b>\n"
+            f"  • RSI Momentum: {la['rsi_status']}\n"
+            f"  • Volatility: {la['vol_status']}\n"
+            f"  • News Guard: {la['news_status']}\n"
+            "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            "🔭 <i>البيانات أعلاه مستخرجة مباشرة من قلب المحرك.</i>"
+        )
+        self._update_message(chat_id, message_id, vision_msg, use_main_kbd=True)
+
     def _handle_status_request(self, chat_id, message_id=None):
         conn_status = "🟢 متصل" if (self.bridge_ref and self.bridge_ref.connected) else "🔴 غير متصل"
         trading_status = "🟢 نشط" if self.trading_enabled else "⏸️ متوقف"
         equity = f"${self.bridge_ref.current_equity:.2f}" if (self.bridge_ref and self.bridge_ref.current_equity) else "N/A"
+
+        # Safety Guard Status
+        n_safe, n_msg = True, "Active"
+        m_safe, m_msg = True, "Stable"
+        if self.analyzer_ref and hasattr(self.analyzer_ref, 'strategy'):
+            n_safe, n_msg = self.analyzer_ref.strategy.news_guard.check_safety()
+            m_safe, m_msg = self.analyzer_ref.strategy.market_guard.check_gap_risk()
+        
+        guard_status = "🛡️ آمن" if (n_safe and m_safe) else "⚠️ حذر (قيود مفعلة)"
         
         local_now = datetime.now() + timedelta(hours=3)
         pos_count = len(self.bridge_ref.open_positions) if self.bridge_ref else 0
+        
+        # Details of Open Positions
+        pos_details = ""
+        if pos_count > 0 and self.bridge_ref:
+            for p in self.bridge_ref.open_positions:
+                side = "BUY" if p.tradeSide == 1 else "SELL"
+                # Safely get volume
+                raw_vol = getattr(p, 'volume', 0)
+                if raw_vol == 0 and hasattr(p, 'tradeData'):
+                    raw_vol = getattr(p.tradeData, 'volume', 0)
+                lots = raw_vol / 10000.0
+                p_pnl = p.grossProfit / 100.0 if hasattr(p, 'grossProfit') else 0.0
+                pos_details += f"  • {side} {lots}L: <code>{p_pnl:+.2f}$</code>\n"
+        else:
+            pos_details = "  <i>لا يوجد صفقات مفتوحة</i>\n"
+
         status_msg = (
-            f"🖥️ <b>حالة نظام GIA </b>\n"
+            f"🖥️ <b>حالة نظام GIA - لوحة البيانات</b>\n"
             f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             f"📡 <b>الاتصال:</b> {conn_status}\n"
             f"⚙️ <b>وضع التداول:</b> {trading_status}\n"
-            f"⚖️ <b>المخاطرة:</b> {self.risk}%\n"
-            f"🚀 <b>الرافعة:</b> 1:{self.leverage}\n"
-            f"💰 <b>الرصيد المتاح:</b> <code>{equity}</code>\n"
-            f"📊 <b>الصفقات المفتوحة:</b> <code>{pos_count}</code>\n"
-            f"📊 <b>الأداة:</b> XAUUSD (Gold)\n"
+            f"🛡️ <b>حالة الأمان:</b> {guard_status}\n"
+            f"🤖 <b>الموديل:</b> <code>{self.active_model_name}</code>\n"
             f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-            f"🕒 {local_now.strftime('%Y-%m-%d | %H:%M:%S')}"
+            f"💰 <b>الرصيد:</b> <code>{equity}</code>\n"
+            f"⚖️ <b>المخاطرة:</b> {self.risk}% | 🚀 1:{self.leverage}\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"📊 <b>الصفقات النشطة ({pos_count}):</b>\n"
+            f"{pos_details}"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🕒 {local_now.strftime('%H:%M:%S')} (UTC+3)"
         )
         if message_id:
             self._update_message(chat_id, message_id, status_msg, use_main_kbd=True)
@@ -409,59 +576,100 @@ class TelegramService:
             self._send_text(chat_id, text, include_keyboard=include_keyboard)
 
     def send_control_panel(self, chat_id, message_id=None):
-        welcome = (
-            "🦁 <b>لوحة التحكم المركزية - GIA Pro 4.0</b>\n"
-            "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
-            "أهلاً بك في واجهة التحكم العربية المتطورة. من هنا يمكنك إدارة عمليات التداول الآلي بالكامل بمستوى احترافي.\n\n"
-            "📩 <b>استخدم الأزرار أدناه للتحكم:</b>"
+        conn_status = "🟢 ON" if (self.bridge_ref and self.bridge_ref.connected) else "🔴 OFF"
+        bid = f"{self.bridge_ref.latest_bid:.2f}" if (self.bridge_ref and self.bridge_ref.latest_bid) else "---"
+        ask = f"{self.bridge_ref.latest_ask:.2f}" if (self.bridge_ref and self.bridge_ref.latest_ask) else "---"
+        equity = f"${self.bridge_ref.current_equity:,.2f}" if (self.bridge_ref and self.bridge_ref.current_equity) else "$0.00"
+        
+        # Determine safety emoji
+        n_safe, m_safe = True, True
+        if self.analyzer_ref and hasattr(self.analyzer_ref, 'strategy'):
+            n_safe, _ = self.analyzer_ref.strategy.news_guard.check_safety()
+            m_safe, _ = self.analyzer_ref.strategy.market_guard.check_gap_risk()
+        guard_emoji = "🛡️" if (n_safe and m_safe) else "⚠️"
+
+        dashboard = (
+            f"🦁 <b>GIA INSTITUTIONAL DASHBOARD 4.0</b>\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"💰 <b>XAUUSD:</b> <code>{bid} / {ask}</code>\n"
+            f"🏦 <b>Equity:</b> <code>{equity}</code>\n"
+            f"📡 <b>Status:</b> {conn_status} | {guard_emoji} <b>Safety:</b> Active\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🤖 <b>Model:</b> <code>{self.active_model_name}</code>\n"
+            f"⚙️ <b>Config:</b> {self.risk}% Risk | 1:{self.leverage} Lev\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"📩 <i>اختر أمراً من القائمة للتحكم أو التحديث:</i>"
         )
         if message_id:
-            self._update_message(chat_id, message_id, welcome, use_main_kbd=True)
+            self._update_message(chat_id, message_id, dashboard, use_main_kbd=True)
         else:
-            self._send_text(chat_id, welcome, include_keyboard=True)
+            self._send_text(chat_id, dashboard, include_keyboard=True)
 
     # 1. Trade Alerts
-    def notify_trade_open(self, direction, lots, price, sl, tp):
+    def notify_trade_open(self, direction, lots, price, sl, tp, trigger_name="MANUAL"):
+        model_emoji = "⚡" if "FLASH" in str(trigger_name).upper() else ("🦁" if "PRO" in str(trigger_name).upper() else "🤖")
+        
         emoji = "🔵" if direction == "BUY" else "🔴"
+        dir_ar = "شراء (BUY)" if direction == "BUY" else "بيع (SELL)"
+        
         msg = (
             f"{emoji} <b>GIA: فتح صفقة جديدة</b>\n"
-            f"----------------------------------\n"
-            f"💎 <b>الأداة:</b> XAUUSD\n"
-            f"⚖️ <b>النوع:</b> {direction}\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🤖 <b>الموديل المنفذ:</b> <code>{trigger_name} {model_emoji}</code>\n"
+            f"💎 <b>الأصل:</b> XAUUSD (الذهب)\n"
+            f"⚖️ <b>النوع:</b> <b>{dir_ar}</b>\n"
             f"📦 <b>الحجم:</b> {lots} Lots\n"
-            f"💰 <b>السعر:</b> {price:.2f}\n"
-            f"🛑 <b>الوقف (SL):</b> {sl:.2f}\n"
-            f"🎯 <b>الهدف (TP):</b> {tp:.2f}\n"
-            f"----------------------------------\n"
-            f"🕒 {(datetime.now() + timedelta(hours=3)).strftime('%H:%M:%S')}"
+            f"💰 <b>سعر الدخول:</b> {price:.2f}\n"
+            f"🛑 <b>وقف الخسارة (SL):</b> {sl:.2f}\n"
+            f"🎯 <b>جني الأرباح (TP):</b> {tp:.2f}\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🕒 <b>التوقيت:</b> {(datetime.now() + timedelta(hours=3)).strftime('%H:%M:%S')}"
         )
         self.broadcast(msg)
 
     def notify_trade_close(self, position_id, profit, reason="Closed"):
+        # Record trade for daily report
+        self.daily_trades.append({'pnl': profit, 'time': datetime.now()})
+        self._save_state()
+        
         emoji = "💰" if profit >= 0 else "📉"
+        reason_ar = "اغلاق يدوي" if reason == "Closed" else ("ضرب الهدف (TP)" if "TP" in reason else "ضرب الوقف (SL)")
+        
         msg = (
             f"{emoji} <b>GIA: إغلاق صفقة</b>\n"
-            f"----------------------------------\n"
-            f"🆔 <b>رقم الصفقة:</b> {position_id}\n"
-            f"📊 <b>النتيجة:</b> {profit:+.2f}$\n"
-            f"📝 <b>السبب:</b> {reason}\n"
-            f"----------------------------------\n"
-            f"🕒 {(datetime.now() + timedelta(hours=3)).strftime('%H:%M:%S')}"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🆔 <b>رقم الصفقة:</b> <code>{position_id}</code>\n"
+            f"📊 <b>النتيجة النهائية:</b> <code>{profit:+.2f}$</code>\n"
+            f"📝 <b>السبب:</b> {reason_ar}\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"🕒 <b>التوقيت:</b> {(datetime.now() + timedelta(hours=3)).strftime('%H:%M:%S')}"
         )
         self.broadcast(msg)
 
     # 2. Performance Report
-    def send_daily_report(self, total_profit, total_trades, win_rate):
+    def send_daily_report(self):
+        # Filter trades for today
+        now = datetime.now()
+        today_trades = [t for t in self.daily_trades if t['time'].day == now.day]
+        
+        total_profit = sum(t['pnl'] for t in today_trades)
+        total_count = len(today_trades)
+        winning_trades = [t for t in today_trades if t['pnl'] > 0]
+        win_rate = (len(winning_trades) / total_count * 100) if total_count > 0 else 0
+        
+        status_emoji = "🚀" if total_profit >= 0 else "📉"
+        
         msg = (
-            f"📊 <b>تقرير الأداء اليومي | GIA</b>\n"
-            f"----------------------------------\n"
-            f"💵 <b>صافي الربح:</b> {total_profit:+.2f}$\n"
-            f"🤝 <b>إجمالي الصفقات:</b> {total_trades}\n"
-            f"🎯 <b>نسبة النجاح:</b> {win_rate:.1f}%\n"
-            f"----------------------------------\n"
-            f"🏆 <i>يوم تداول ناجح!</i>"
+            f"{status_emoji} <b>تقرير الأداء اليومي | GIA Pro</b>\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"💵 <b>صافي الربح:</b> <code>{total_profit:+.2f}$</code>\n"
+            f"🤝 <b>عدد الصفقات:</b> <code>{total_count}</code>\n"
+            f"🎯 <b>نسبة النجاح:</b> <code>{win_rate:.1f}%</code>\n"
+            f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
+            f"📅 التاريخ: {now.strftime('%Y-%m-%d')}\n"
+            f"🏆 <i>{'يوم تداول ممتاز!' if total_profit > 0 else 'يوم متوازن، ننتظر الفرص القادمة.'}</i>"
         )
-        self.broadcast(msg)
+        self.broadcast(msg, include_keyboard=True)
 
     # 3. Emergency Notifications
     def notify_emergency(self, error_msg):
@@ -501,17 +709,49 @@ class TelegramService:
         self.broadcast(msg)
 
     def notify_signal_detection(self, direction, analysis, confidence):
+        # 🟢 PREVENT SPAM: Ignore WAIT signals totally
+        if str(direction).upper() == "WAIT":
+            return
+
+        # Normalize confidence to percentage
+        try:
+            conf_val = float(confidence) if confidence is not None else 0.0
+        except:
+            conf_val = 0.0
+            
+        conf_pct = conf_val * 100 if conf_val <= 1.0 else conf_val
+
+        # Skip low-quality signals
+        if conf_pct < self.min_signal_conf_pct:
+            logging.info(f"Signal alert skipped (low confidence {conf_pct:.1f}%).")
+            return
+
+        now_ts = time.time()
+        # Throttle duplicate alerts (same direction within cooldown)
+        # We allow re-alert if confidence improved significantly (>5%)
+        last_dir = self.last_signal_alert.get("direction")
+        last_conf = self.last_signal_alert.get("confidence", 0.0)
+        
+        if (
+            direction == last_dir and
+            (now_ts - self.last_signal_alert.get("ts", 0)) < self.signal_cooldown_sec and
+            (conf_pct - last_conf) < 5 # Only alert again if confidence increased by 5%+
+        ):
+            logging.info("Signal alert suppressed (duplicate within cooldown).")
+            return
+
         emoji = "📡"
         msg = (
             f"{emoji} <b>GIA: كشف إشارة قوية</b>\n"
             f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             f"⚖️ <b>الاتجاه المتوقع:</b> {direction}\n"
             f"🧠 <b>التحليل:</b> {analysis}\n"
-            f"📊 <b>مستوى الثقة:</b> {confidence}%\n"
+            f"📊 <b>مستوى الثقة:</b> {conf_pct:.1f}%\n"
             f"⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯\n"
             f"⏳ <i>سيتم التنفيذ تلقائياً بعد الفحص النهائي...</i>"
         )
         self.broadcast(msg)
+        self.last_signal_alert = {"ts": now_ts, "direction": direction, "confidence": conf_pct}
 
 # Global instance
 telegram_service = TelegramService()

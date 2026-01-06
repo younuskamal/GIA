@@ -70,7 +70,9 @@ import argparse
 
 def run_production_engine():
     # 0. Argument Parsing for Server Mode
-    parser = argparse.ArgumentParser(description="GIA Institutional Live Engine")
+    parser = argparse.ArgumentParser(description=r"""
+GIA Institutional Live Demo - Professional Execution Logic
+""")
     parser.add_argument('--model_idx', type=str, help='Index of model or C')
     parser.add_argument('--risk', type=float, help='Dynamic Risk %')
     parser.add_argument('--lev', type=int, help='Account Leverage')
@@ -141,9 +143,11 @@ def run_production_engine():
     is_duo_mode = False
     if choice == 'C':
         analyzer = TripleConsensusModel(models_main_dir)
+        telegram_service.active_model_name = "Triple Consensus"
     elif choice == 'P':
         analyzer = EliteDuoEngine(models_main_dir)
         is_duo_mode = True
+        telegram_service.active_model_name = "Elite Duo (Pro+Flash)"
         print(f"   {Fore.CYAN}💎 ELITE DUO ACTIVATED: Harmonizing PRO (M15) & FLASH (M1).{Style.RESET_ALL}")
     elif choice.isdigit() and 1 <= int(choice) <= len(all_models):
         m_name = all_models[int(choice)-1]
@@ -152,6 +156,7 @@ def run_production_engine():
             is_flash_mode = True
             global TIMEFRAME
             TIMEFRAME = "M1"
+        telegram_service.active_model_name = m_name
     else:
         print(f"{Fore.RED}❌ ERROR: Invalid Model Selection. Use 1-{len(all_models)}, C or P.{Style.RESET_ALL}")
         return
@@ -161,6 +166,7 @@ def run_production_engine():
 
     # Start Telegram Listener early for responsiveness
     telegram_service.bridge_ref = bridge # Link bridge for status reporting
+    telegram_service.analyzer_ref = analyzer # Link analyzer for safety reporting
     telegram_service.start_listener()
     telegram_service.broadcast("🚀 <b>GIA Institutional Engine Starting...</b>", include_keyboard=True)
 
@@ -169,21 +175,51 @@ def run_production_engine():
         telegram_service.notify_emergency("cTrader Connection Refused")
         return
     
+    print("⏳ Waiting for cTrader API Readiness (Authorization & Symbols)...")
+    if not bridge.ready_event.wait(timeout=30):
+        print(f"{Fore.YELLOW}⚠️ WARNING: Bridge ready_event timeout. Attempting to proceed...{Style.RESET_ALL}")
+    
     telegram_service.broadcast("✅ <b>GIA Connected & Authorized. Monitoring Market...</b>")
 
     # State Synchronizer
-    if not hasattr(run_institutional_engine, 'processed_dict'):
-        run_institutional_engine.processed_dict = {"M1": "", "M15": "", "H1": ""}
+    if not hasattr(run_production_engine, 'processed_dict'):
+        run_production_engine.processed_dict = {"M1": "", "M15": "", "H1": ""}
     
+    # Cache latest ATR per timeframe for live trailing alignment
+    atr_cache = {"M1": None, "M15": None, "H1": None}
+    PRO_CAP, FLASH_CAP = 1, 2  # Max concurrent per engine in DUO mode
+
+    def get_open_counts():
+        """Returns (pro_open, flash_open, total_open) based on tracked live positions."""
+        pro_open = flash_open = 0
+        for st in getattr(bridge, "position_state", {}).values():
+            tf = st.get('tf')
+            if tf == "M1":
+                flash_open += 1
+            elif tf == "M15":
+                pro_open += 1
+            else:
+                pro_open += 1  # Default to slower engine if unknown
+        total_tracked = pro_open + flash_open
+        total_reported = bridge.get_open_position_count()
+        total_open = max(total_tracked, total_reported)
+        return pro_open, flash_open, total_open
+
     # Pre-populate with latest timestamps to prevent ghost trades on launch
-    run_institutional_engine.processed_dict["M1"] = get_latest_ts(f"{ASSET}_M1.csv") or ""
-    run_institutional_engine.processed_dict["M15"] = get_latest_ts(f"{ASSET}_M15.csv") or ""
+    run_production_engine.processed_dict["M1"] = get_latest_ts(f"{ASSET}_M1.csv") or ""
+    run_production_engine.processed_dict["M15"] = get_latest_ts(f"{ASSET}_M15.csv") or ""
 
     last_check_time = time.time()
     last_sync_time = 0
     last_daily_report_day = datetime.now().day
     
-    mode_name = "TRIPLE CONSENSUS" if is_consensus else os.path.basename(analyzer.model_path)
+    if is_consensus:
+        mode_name = "TRIPLE CONSENSUS"
+    elif is_duo_mode:
+        mode_name = "ELITE DUO (PRO + FLASH)"
+    else:
+        mode_name = os.path.basename(analyzer.model_path)
+    
     print(f"\n{Fore.GREEN}🟢 GIA INSTITUTIONAL LIVE [{mode_name}] ACTIVE.{Style.RESET_ALL}")
     print(f"📡 MODE: Autonomous API Fetching | PATH: {DATA_FOLDER}")
     logging.info(f"Engine Started | Mode: {choice} | Risk: {USER_RISK}%")
@@ -209,14 +245,14 @@ def run_production_engine():
 
                 now = datetime.now()
                 equity = bridge.current_equity
-                open_count = bridge.get_open_position_count()
+                pro_open, flash_open, open_count = get_open_counts()
                 
                 # 2. AUTONOMOUS TRIGGER & SYNC
                 # In DUO mode, we track two triggers (M1 and M15)
                 triggers = []
                 
-                # Auto-sync every 10 seconds
-                if time.time() - last_sync_time > 10:
+                # Auto-sync every 60 seconds (Optimal for M1)
+                if time.time() - last_sync_time > 60:
                     sys.stdout.write("\n")
                     bridge.fetch_live_data()
                     last_sync_time = time.time()
@@ -231,35 +267,36 @@ def run_production_engine():
                                 time.sleep(15)
                         except: pass
 
-                    # Determine what needs to run
-                    if is_duo_mode:
-                        # M1 Trigger (Flash)
-                        if 5 <= now.second <= 25:
-                            triggers.append({'tf': 'M1', 'model': analyzer.flash, 'name': 'FLASH'})
-                        # M15 Trigger (Pro)
-                        if now.minute % 15 == 0 and 5 <= now.second <= 25:
-                            triggers.append({'tf': 'M15', 'model': analyzer.pro, 'name': 'PRO'})
+                # Determine what needs to run
+                if is_duo_mode:
+                    # M1 Trigger (Flash)
+                    if 5 <= now.second <= 25:
+                        triggers.append({'tf': 'M1', 'model': analyzer.flash, 'name': 'FLASH'})
+                    # M15 Trigger (Pro)
+                    if now.minute % 15 == 0 and 5 <= now.second <= 25:
+                        triggers.append({'tf': 'M15', 'model': analyzer.pro, 'name': 'PRO'})
+                else:
+                    is_triggered = False
+                    if TIMEFRAME == "M1":
+                        if 5 <= now.second <= 25: is_triggered = True
                     else:
-                        is_triggered = False
-                        if TIMEFRAME == "M1":
-                            if 5 <= now.second <= 25: is_triggered = True
-                        else:
-                            if now.minute % 15 == 0 and 5 <= now.second <= 25: is_triggered = True
+                        if now.minute % 15 == 0 and 5 <= now.second <= 25: is_triggered = True
+                    
+                    if is_triggered:
+                        triggers.append({'tf': TIMEFRAME, 'model': analyzer, 'name': 'SINGLE'})
                         
-                        if is_triggered:
-                            triggers.append({'tf': TIMEFRAME, 'model': analyzer, 'name': 'SINGLE'})
                 for trigger in triggers:
                     target_tf = trigger['tf']
                     active_model = trigger['model']
                     target_csv = f"{ASSET}_{target_tf}.csv"
                     ts = get_latest_ts(target_csv)
                     
-                    if ts and ts != run_institutional_engine.processed_dict.get(target_tf):
+                    if ts and ts != run_production_engine.processed_dict.get(target_tf):
                         # 🦁 INSTITUTIONAL SAFETY: Ignore old data from before market open
                         try:
                             sig_dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
                             if (datetime.now() - sig_dt).total_seconds() > 1800: # Older than 30m
-                                run_institutional_engine.processed_dict[target_tf] = ts
+                                run_production_engine.processed_dict[target_tf] = ts
                                 continue
                         except: pass
                         
@@ -273,7 +310,9 @@ def run_production_engine():
                             signal = res['signal']
                             atr = res['atr']
                             size_mult = res.get('sizing_multiplier', 1.0)
+                            regime_flag = res.get('regime_flag', 0)
                             expl = res['explanation']
+                            atr_cache[target_tf] = atr
                             
                             print(f"   📜 ANALYTICS: {Fore.CYAN}{expl}{Style.RESET_ALL}")
                             logging.info(f"Signal: {signal} | ATR: {atr} | Expl: {expl}")
@@ -281,7 +320,29 @@ def run_production_engine():
                             # Notify Telegram on Signal
                             telegram_service.notify_signal_detection(signal, expl, res.get('confidence', 0))
 
-                            if signal in ['BUY', 'SELL'] and open_count < RiskRules.MAX_CONCURRENT_TRADES:
+                            # 📡 Broadcast Live Vision to Telegram Dashboard
+                            telegram_service.update_market_status(
+                                signal=signal,
+                                confidence=res.get('confidence', 0),
+                                rsi=res.get('rsi', 50),
+                                vol_regime=res.get('vol_regime', 1.0),
+                                news_safe=res.get('news_safe', True)
+                            )
+
+                            if signal in ['BUY', 'SELL']:
+                                # Per-engine caps in DUO mode
+                                if is_duo_mode:
+                                    if trigger['name'] == 'PRO' and pro_open >= PRO_CAP:
+                                        print(f"   {Fore.YELLOW}⏸️ PRO CAP HIT: {pro_open}/{PRO_CAP}. Skipping PRO entry.{Style.RESET_ALL}")
+                                        continue
+                                    if trigger['name'] == 'FLASH' and flash_open >= FLASH_CAP:
+                                        print(f"   {Fore.YELLOW}⏸️ FLASH CAP HIT: {flash_open}/{FLASH_CAP}. Skipping FLASH entry.{Style.RESET_ALL}")
+                                        continue
+
+                                if open_count >= RiskRules.MAX_CONCURRENT_TRADES:
+                                    print(f"   {Fore.YELLOW}⏸️ GLOBAL CAP HIT: {open_count}/{RiskRules.MAX_CONCURRENT_TRADES}. Skipping entry.{Style.RESET_ALL}")
+                                    continue
+
                                 # B. Professional Risk Calculation (Dynamic from Telegram)
                                 current_risk = telegram_service.risk
                                 # 🦁 Duo Risk Override: FLASH always 0.5%
@@ -291,11 +352,30 @@ def run_production_engine():
                                 current_lev = telegram_service.leverage
                                 current_guard = telegram_service.margin_guard
                                 
-                                risk_usd = equity * (current_risk / 100.0) * size_mult
-                                sl_val = atr * 2.0
-                                tp_val = atr * 3.5
+                                if atr <= 0:
+                                    print(f"   {Fore.RED}⚠️ Invalid ATR (<=0). Skipping trade to avoid bad sizing.{Style.RESET_ALL}")
+                                    continue
+
+                                is_legacy = hasattr(analyzer, 'strategy') and getattr(analyzer.strategy, 'is_legacy', False)
+                                if is_legacy:
+                                    sl_mult, tp_mult = 1.5, 3.0
+                                else:
+                                    if regime_flag == 2:   # HIGH_VOL
+                                        sl_mult, tp_mult = 2.5, 4.0
+                                    elif regime_flag == 1: # TREND
+                                        sl_mult, tp_mult = 1.8, 3.5
+                                    else:                  # RANGE / default
+                                        sl_mult, tp_mult = 2.0, 2.7
+
+                                sl_val = max(atr * sl_mult, 1e-6)
+                                tp_val = atr * tp_mult
                                 sl_pips, tp_pips = sl_val * 10, tp_val * 10
+
+                                risk_usd = equity * (current_risk / 100.0) * size_mult
                                 lots = max(0.01, round(risk_usd / (100 * sl_val), 2))
+                                regime_name = {0: "RANGE", 1: "TREND", 2: "HIGH_VOL"}.get(regime_flag, "UNKNOWN")
+                                logging.info(f"💎 Precision Risk Logic: ATR={atr:.4f} | Regime={regime_name} | SLx{sl_mult} TPx{tp_mult} | Lots={lots}")
+                                print(f"   📏 SIZING: Regime={regime_name} | SLx{sl_mult} TPx{tp_mult} | Lots: {lots}")
                                 
                                 # C. Margin Check
                                 price = bridge.latest_ask if signal == 'BUY' else bridge.latest_bid
@@ -313,14 +393,23 @@ def run_production_engine():
 
                                 # D. Order Transmission
                                 print(f"   🎯 EXECUTION: {signal} {lots} Lots | SL: {round(sl_pips,1)} | TP: {round(tp_pips,1)}")
-                                bridge.send_market_order(signal, lots, sl_pips, tp_pips)
+                                bridge.last_entry_atr = atr
+                                bridge.last_entry_tf = target_tf
+                                bridge.send_market_order(signal, lots, sl_pips, tp_pips, trigger_name=trigger['name'])
+                        else:
+                            err = res.get('error', 'Unknown Error')
+                            print(f"   ⚠️ ANALYSIS FAILED: {err}")
+                            logging.error(f"Analysis Failed [{trigger['name']}]: {err}")
 
                         # E. Clean State
-                        run_institutional_engine.processed_dict[target_tf] = ts
+                        run_production_engine.processed_dict[target_tf] = ts
                         last_check_time = time.time()
                 else:
                     # If M15 isn't updated yet, we wait and retry sync
                     pass
+
+                # Apply live BE/Trailing aligned with backtest logic
+                bridge.trail_positions(atr_cache)
 
                 # 3. Status Display (Heartbeat)
                 bid, ask = (bridge.latest_bid or 0.0), (bridge.latest_ask or 0.0)

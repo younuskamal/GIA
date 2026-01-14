@@ -24,7 +24,7 @@ class StrategyHandler:
         self.last_trade_date = None
         self.last_trade_time = None
         self.MAX_TRADES_PER_DAY = 100 # Ultra-High Frequency Scalping Cap
-        self.MIN_TIME_BETWEEN_TRADES = 1 if uhf_mode else 5 # Dynamic clustering
+        self.MIN_TIME_BETWEEN_TRADES = 0.5 # 🦁 Professional Pulse (30 seconds)
         self.daily_trade_count = 0
         
         # 🛡️ Safety Units
@@ -36,7 +36,8 @@ class StrategyHandler:
     def apply_strategy(self, 
                        raw_signal: str, 
                        confidence: float, 
-                       context: Dict[str, Any]) -> Dict[str, Any]:
+                       context: Dict[str, Any],
+                       record_trade: bool = True) -> Dict[str, Any]:
         """
         Applies filtering logic based on the selected Mode.
         """
@@ -51,16 +52,21 @@ class StrategyHandler:
             current_date = pd.Timestamp(current_date)
 
 
-        # 🔓 INSTITUTIONAL MODE: Smart Filtering based on Market Physics
-        # 1. Entropy Guard (Chaos Filter) - Softened for High-Frequency Scaling
+        # 🔓 INSTITUTIONAL MODE: Balanced Quality Guard
         entropy = context.get('market_entropy', 0.5)
-        if entropy > 0.88 and confidence < 0.85: # Increased from 0.75
-            reasons.append(f"High Market Chaos (Entropy {entropy:.2f} > 0.88)")
+        
+        # Tier 1: Relaxed for Institutional Pursuit (2.0 threshold)
+        if entropy > 2.0 and confidence < 0.82:
+            reasons.append(f"Market Noise Filter (Entropy {entropy:.2f} > 2.0)")
+            return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
+        # Tier 2: Extreme Chaos
+        if entropy > 2.5 and confidence < 0.90:
+            reasons.append(f"Extreme Market Chaos (Entropy {entropy:.2f} > 2.5)")
             return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
 
-        # 2. Exhaustion Filter (Anti-FOMO) - Softened to capture extended runs
+        # 2. Exhaustion Filter (Anti-FOMO)
         exhaustion = context.get('exhaustion_index', 0)
-        if exhaustion > 4.5 and confidence < 0.90: # Increased from 3.5
+        if exhaustion > 4.5 and confidence < 0.90: 
             reasons.append(f"Price Exhaustion ({exhaustion:.2f} > 4.5)")
             return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
 
@@ -84,8 +90,8 @@ class StrategyHandler:
 
 
 
-        # 2. Basic Confidence Check (v14 Spec: 0.40)
-        base_thresh = 0.40 if self.is_legacy else RiskRules.MIN_CONFIDENCE_LEVEL
+        # 2. Basic Confidence Check (Institutional Gold Standard)
+        base_thresh = 0.50 
         if confidence < base_thresh:
             reasons.append(f"Low Confidence ({confidence:.2f} < {base_thresh})")
             return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
@@ -105,17 +111,24 @@ class StrategyHandler:
 
             # Time Clustering: Avoid opening trades too close to each other
             if self.last_trade_time:
-                diff = (current_date - self.last_trade_time).total_seconds() / 60
-                if diff < self.MIN_TIME_BETWEEN_TRADES:
-                    reasons.append(f"Trade Clustering Guard ({diff:.1f}m < {self.MIN_TIME_BETWEEN_TRADES}m)")
+                diff_sec = (current_date - self.last_trade_time).total_seconds()
+                diff_min = diff_sec / 60.0
+                
+                # 🦁 SMART BYPASS: If confidence is elite (>88%), allow faster entry (10s cooldown)
+                # Otherwise, use standard institutional pulse (30s)
+                bypass_thresh = 0.88
+                effective_cooldown = 0.15 if confidence > bypass_thresh else self.MIN_TIME_BETWEEN_TRADES # 0.15m = 9s
+                
+                if diff_min < effective_cooldown:
+                    reasons.append(f"Clustering Guard ({diff_sec:.0f}s < {effective_cooldown*60:.0f}s)")
                     return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
 
         # 4. Session & Liquidity IQ
         hour = current_date.hour if current_date else 0
         is_high_liquidity = (8 <= hour <= 11) or (13 <= hour <= 17) # London/NY Primary
         if not is_high_liquidity:
-            # UHF Mode bypasses liquidity penalty for 24/7 pulse-capture
-            penalty = 0.00 if getattr(self, 'uhf_mode', False) else 0.15
+            # 🦁 Global Pulse: Disable liquidity penalty to capture 24/7 moves
+            penalty = 0.00
             liquidity_thresh = base_thresh + penalty 
             if confidence < liquidity_thresh:
                 reasons.append(f"Low Liquidity IQ ({confidence:.2f} < {liquidity_thresh:.2f})")
@@ -131,25 +144,24 @@ class StrategyHandler:
         if not self.is_legacy:
             atr = context.get('atr', 1.0)
             spread = context.get('spread', 0.5)
-            # Threshold: 50% of ATR (Standard Institutional)
-            # 🦁 H-Freq Scalper Protection: On M1, Gold ATR is very small. 
-            # We bypass the cost filter for M1 to allow for ultra-high frequency.
-            is_m1 = atr < 0.25 # M1 Gold ATR is typically below 0.25
-            cost_limit = 0.60
+            # Threshold: 80% of ATR (Professional Standard)
+            is_m1 = atr < 0.25 
+            cost_limit = 0.80 # 🦁 Tightened for Small Account Protection
             if is_m1: 
-                cost_limit = 10.0 if getattr(self, 'uhf_mode', False) else 1.25
+                cost_limit = 10.0 if getattr(self, 'uhf_mode', False) else 1.2
             
             if spread > (atr * cost_limit) and confidence < 0.90:
-                 reasons.append(f"High Cost/Spread ({spread:.2f} > {atr*cost_limit:.2f})")
-                 return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
+                  reasons.append(f"High Cost/Spread ({spread:.2f} > {atr*cost_limit:.2f})")
+                  return self._finalize(SignalType.WAIT.value, confidence, "LOW", reasons)
 
 
 
 
         # Final Approval for Raw Signals
         if raw_signal != SignalType.WAIT.value:
-            self.daily_trade_count += 1
-            self.last_trade_time = current_date
+            if record_trade:
+                self.daily_trade_count += 1
+                self.last_trade_time = current_date
             return self._finalize(raw_signal, confidence, "MEDIUM", ["Institutional Filter Approved"])
 
         return self._finalize(SignalType.WAIT.value, confidence, "LOW", ["Signal Filtered"])

@@ -836,7 +836,7 @@ class ExportManager:
 
 # --- Battle Ground Engine ---
 class BattleArena:
-    DEFAULT_DATA_DIR = r"C:\GIA_DATA"
+    DEFAULT_DATA_DIR = os.path.join(os.getcwd(), "data")
 
     def __init__(self, data_dir=None):
         self.data_dir = data_dir if data_dir else self.DEFAULT_DATA_DIR
@@ -954,11 +954,8 @@ class BattleArena:
 
             # --- MODEL INTELLIGENCE REGISTRY ---
             MODEL_NAVIGATOR = {
-                "GIA_SIGNAL_PRO.pkl": {"tf": "M1", "broker": "IC MARKETS", "risk": 0.5, "latency": 0.02, "desc": "High-Frequency Scalper"},
-                "GIA_v2_PRO.pkl": {"tf": "M15", "broker": "FIPER", "risk": 1.0, "latency": 0.05, "desc": "Institutional Hybrid (Elite)"},
-                "GIA_v14_PRO.pkl": {"tf": "H1", "broker": "PEPPERSTONE", "risk": 1.5, "latency": 0.15, "desc": "Strategic Trend Hunter"},
-                "GIA_v1.1_PRO.pkl": {"tf": "M15", "broker": "IC MARKETS", "risk": 1.0, "latency": 0.1, "desc": "Standard Balanced Bot"},
-                "GIA_v2_FLASH.pkl": {"tf": "M1", "broker": "IC MARKETS", "risk": 1.2, "latency": 0.05, "desc": "High-Velocity Scalper (M1)"}
+                "GIA_v2_PRO.pkl": {"tf": "M15", "broker": "Spotware", "risk": 1.0, "latency": 0.1, "desc": "Institutional Hybrid (Elite)"},
+                "GIA_v2_FLASH.pkl": {"tf": "M1", "broker": "Spotware", "risk": 0.5, "latency": 0.05, "desc": "High-Velocity Scalper (M1)"}
             }
 
             print(f"\n {Fore.YELLOW}STEP 1: SELECT YOUR AI MODEL{Style.RESET_ALL}")

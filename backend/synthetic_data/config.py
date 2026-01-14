@@ -1,8 +1,4 @@
-
-"""
-GIA Universal Synthetic Market Config
-Institutional Parameters for Multi-Asset Simulation (Metals, Forex, Crypto)
-"""
+import os
 
 class AssetProfiles:
     # 🥇 METALS: High volatility, Sharp wicks, Institutional spikes
@@ -90,5 +86,5 @@ class SyntheticConfig:
     STRESS_LEVEL = 'NORMAL' # LOW, NORMAL, EXTREME
     NEWS_PROB = 0.0015      # Global probability of a news spike per minute
     
-    # 📂 Paths
-    OUTPUT_DIR = r"C:\Users\yonsy\OneDrive\Desktop\GIA_v1\backend\hestory"
+    # 📂 Paths (Relative to project root for cross-platform support)
+    OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data")

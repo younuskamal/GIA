@@ -54,7 +54,7 @@ class CTraderBridge:
         self.client = None
         self.connected = False
         self.authorized = False
-        self.current_equity = 0.0
+        self.current_balance = 0.0 # Standard Balance
         self.open_positions = []
         self.symbol_id = None
         self.digits = 2
@@ -67,7 +67,10 @@ class CTraderBridge:
         self.data_cache = {} # TF -> Candles
         self.last_notified_connected = False
         self.position_state = {} # PosID -> live tracking for BE/Trailing
+        self.notified_closures = set() # 🦁 Anti-Spam: Track already reported closures
         self.last_entry_atr = None
+        self.last_entry_tf = None
+        
         self.last_entry_tf = None
         
         # 🦁 Project-Centric Path Mapping
@@ -83,6 +86,8 @@ class CTraderBridge:
         # Connection status events
         self.ready_event = threading.Event()
         self.auth_stage = 0 # 1: App, 2: Acc, 3: Symbols, 4: Ready
+        self.is_rate_limited = False
+        self.rate_limit_reset = 0
 
     def _on_connected(self, client):
         print("📡 cTrader API: Connected to Server. Handshaking...")
@@ -181,8 +186,8 @@ class CTraderBridge:
             try:
                 actual_payload = Protobuf.extract(message)
                 if hasattr(actual_payload, 'trader'):
-                    self.current_equity = actual_payload.trader.balance / 100.0
-                    # Silenced for clean Dashboard UI
+                    self.current_balance = actual_payload.trader.balance / 100.0
+                    # Success log removed for cleaner console
                     # print(f"💰 Account Balance Updated: ${self.current_equity}")
                     if self.auth_stage == 4:
                         self.auth_stage = 5
@@ -196,18 +201,28 @@ class CTraderBridge:
         elif msg_type == Protobuf._names["ProtoOAErrorRes"]:
             payload = Protobuf.extract(message)
             print(f"❌ cTrader API ERROR: {payload.errorCode} - {payload.description}")
+            if payload.errorCode == "BLOCKED_PAYLOAD_TYPE":
+                print(f"⚠️ RATE LIMIT DETECTED. Squashing requests for 5 minutes.")
+                self.is_rate_limited = True
+                self.rate_limit_reset = time.time() + 300
+                telegram_service.notify_emergency("cTrader Rate Limit: Waiting 5m")
+                # Proactively stop service to trigger self-healing in the main loop
+                if hasattr(self, 'client'):
+                    self.client.stopService()
 
         # Spot (Price) Event (2131)
         elif msg_type == Protobuf._names["ProtoOASpotEvent"]:
             payload = Protobuf.extract(message)
             if payload.symbolId == self.symbol_id:
                 if hasattr(payload, 'bid'): 
-                    new_bid = payload.bid / 100000.0
+                    raw_bid = payload.bid
+                    new_bid = raw_bid / 100000.0 if raw_bid > 100000 else raw_bid
                     if self.latest_bid is None:
                         logger.info(f"First Ticket Received: Bid={new_bid}")
                     self.latest_bid = new_bid
                 if hasattr(payload, 'ask'): 
-                    new_ask = payload.ask / 100000.0
+                    raw_ask = payload.ask
+                    new_ask = raw_ask / 100000.0 if raw_ask > 100000 else raw_ask
                     if self.latest_ask is None:
                         logger.info(f"First Ticket Received: Ask={new_ask}")
                     self.latest_ask = new_ask
@@ -232,83 +247,83 @@ class CTraderBridge:
             self._update_account_info()
             
             exec_type = getattr(payload, 'executionType', None)
+            
+            # Helper for price formatting
+            def _get_val(v):
+                if not v: return 0.0
+                return v / 100000.0 if v > 100000 else v
+
+            # 🦁 Professional Debug: Map execution types for clarity
+            exec_types_map = {1: "ACCEPTED", 2: "FILLED", 3: "FILLED_ALT", 4: "REPLACED/RECOMPUTED", 
+                             5: "REJECTED", 6: "EXPIRED", 7: "CANCELLED"}
+            exec_name = exec_types_map.get(exec_type, f"UNKNOWN_{exec_type}")
+            
             if exec_type == 1: # ORDER_ACCEPTED
                 print("📝 cTrader API: Order Accepted.")
                 logger.info("EXEC: Order Accepted by cTrader.")
-            elif exec_type == 3: # ORDER_FILLED
-                # Log actual filled position details correctly
+            elif exec_type in [2, 3]: # ORDER_FILLED (Standard 2 or Alt 3)
                 pos = getattr(payload, 'position', None)
-                sl_view = (pos.stopLoss / 100000.0) if (pos and pos.stopLoss) else 'N/A'
-                tp_view = (pos.takeProfit / 100000.0) if (pos and pos.takeProfit) else 'N/A'
-                
                 if pos:
                     pos_id = pos.positionId
-                    print(f"✨ cTrader API: Order Filled! (PosID: {pos_id})")
+                    status = getattr(pos, 'positionStatus', 1) # 1=OPEN, 2=CLOSED
+                    print(f"✨ cTrader API: Order Filled! (PosID: {pos_id}) | Status: {status} | Type: {exec_name}")
                     
-                    # Check if we have pending SL/TP for this execution
-                    # We use a simple logic: if we just opened a position and have pending SL/TP, apply it.
-                    if self.pending_sl_tp:
-                        sl = self.pending_sl_tp.get('sl')
-                        tp = self.pending_sl_tp.get('tp')
-                        if sl or tp:
-                            # Use raw float prices rounded to symbol digits.
-                            final_sl = round(sl, self.digits) if sl else None
-                            final_tp = round(tp, self.digits) if tp else None
-                            
-                            # Safety Check: For BUY, SL must be < current Bid. For SELL, SL must be > current Ask.
-                            direction = self.pending_sl_tp.get('direction')
-                            if self.latest_bid and self.latest_ask and direction:
-                                if direction == "BUY" and final_sl and final_sl >= self.latest_bid:
-                                    final_sl = round(self.latest_bid - 0.50, self.digits) # Force below
-                                elif direction == "SELL" and final_sl and final_sl <= self.latest_ask:
-                                    final_sl = round(self.latest_ask + 0.50, self.digits) # Force above
+                    if status == 2: # 🦁 REAL CLOSURE
+                        if pos_id not in self.notified_closures:
+                            pnl = (payload.grossProfit / 100.0) if hasattr(payload, 'grossProfit') else 0
+                            telegram_service.notify_trade_close(pos_id, pnl, reason="Closed/Stop-out")
+                            self.notified_closures.add(pos_id)
+                            logger.info(f"EXEC: Position {pos_id} CLOSED via Fill.")
+                    else: # 🦁 POSITION OPEN/UPDATE
+                        # 1. Record basic state first so we have 'atr'/'tf' available
+                        self._record_position(pos)
+                        
+                        # 2. Check if we have pending SL/TP for this execution
+                        if self.pending_sl_tp:
+                            sl = self.pending_sl_tp.get('sl')
+                            tp = self.pending_sl_tp.get('tp')
+                            st = self.position_state.get(pos_id, {})
+                            st['atr'] = self.pending_sl_tp.get('atr')
+                            st['tf'] = self.pending_sl_tp.get('tf')
+                            self.position_state[pos_id] = st
 
-                            print(f"🛡️ cTrader API: Protecting Pos {pos_id} | SL: {final_sl}, TP: {final_tp}")
-                            
-                            self.client.send("ProtoOAAmendPositionSLTPReq",
-                                             ctidTraderAccountId=self.account_id,
-                                             positionId=pos_id,
-                                             stopLoss=final_sl,
-                                             takeProfit=final_tp)
-                            
-                            # Initial notification will happen when SL/TP are confirmed by server
-                        self.pending_sl_tp = {} 
+                            if sl or tp:
+                                print(f"🛡️ cTrader API: Protecting Pos {pos_id} | SL: {sl}, TP: {tp}")
+                                self._amend_sl_tp(pos_id, new_sl=sl, new_tp=tp)
+                            self.pending_sl_tp = {} 
+
+                        # Report to Telegram for Open
+                        trade_data = getattr(pos, 'tradeData', None)
+                        direction = "BUY" if trade_data and trade_data.tradeSide == 1 else "SELL"
+                        raw_vol = getattr(trade_data, 'volume', 0) if trade_data else getattr(pos, 'volume', 0)
+                        lots = raw_vol / 10000.0
+                        entry_price = getattr(pos, 'entryPrice', 0)
+                        if entry_price == 0 and hasattr(pos, 'price'): entry_price = pos.price
+                        entry_price /= 100000.0
+                        
+                        sl_val = _get_val(getattr(pos, 'stopLoss', 0))
+                        tp_val = _get_val(getattr(pos, 'takeProfit', 0))
+                        
+                        trig_name = getattr(self, 'last_trigger_name', 'AUTO')
+                        telegram_service.notify_trade_open(direction, lots, entry_price, sl_val, tp_val, trigger_name=trig_name)
+                        logger.info(f"EXEC: Position {pos_id} OPENED via Fill ({exec_name}).")
                 
-                # Report to Telegram with actual position details
-                if pos:
-                    trade_data = getattr(pos, 'tradeData', None)
-                    direction = "BUY" if trade_data and trade_data.tradeSide == 1 else "SELL"
-                    raw_vol = getattr(trade_data, 'volume', 0) if trade_data else getattr(pos, 'volume', 0)
-                    lots = raw_vol / 10000.0
-                    entry_price = getattr(pos, 'entryPrice', 0)
-                    if entry_price == 0 and hasattr(pos, 'price'): entry_price = pos.price
-                    entry_price /= 100000.0
-                    
-                    # If we have confirmed SL/TP from the Fill, use them. 
-                    # Otherwise use our pending ones if we just sent them.
-                    sl_val = getattr(pos, 'stopLoss', 0) / 100000.0
-                    tp_val = getattr(pos, 'takeProfit', 0) / 100000.0
-                    
-                    if sl_val == 0 and 'last_sent_sl' in globals().get('__dict__', {}): # conceptual
-                        pass # complicated to track across threads without more state
-                    
-                    trig_name = getattr(self, 'last_trigger_name', 'AUTO')
-                    # Record for BE/Trailing with ATR/TF hint from pending_sl_tp
-                    self._record_position(
-                        pos,
-                        direction=direction,
-                        atr=self.pending_sl_tp.get('atr', getattr(self, 'last_entry_atr', None)),
-                        tf=self.pending_sl_tp.get('tf', getattr(self, 'last_entry_tf', None))
-                    )
-                    telegram_service.notify_trade_open(direction, lots, entry_price, sl_val, tp_val, trigger_name=trig_name)
-                
-                logger.info(f"EXEC: Order Filled. Position ID: {pos_id if pos else 'N/A'}")
-            
-            elif exec_type in [4, 5, 6]: # POSITION_CLOSED or similar
+            elif exec_type in [4, 5, 6, 7]: # Changes/Cancellations
                 pos = getattr(payload, 'position', None)
                 if pos:
-                    pnl = (payload.grossProfit / 100.0) if hasattr(payload, 'grossProfit') else 0
-                    telegram_service.notify_trade_close(pos.positionId, pnl, reason="Closed/Stop-out")
+                    pos_id = pos.positionId
+                    is_closed = (getattr(pos, 'positionStatus', 1) == 2)
+                    
+                    if is_closed and pos_id not in self.notified_closures:
+                        pnl = (payload.grossProfit / 100.0) if hasattr(payload, 'grossProfit') else 0
+                        telegram_service.notify_trade_close(pos_id, pnl, reason="Closed/Stop-out")
+                        self.notified_closures.add(pos_id)
+                        logger.info(f"EXEC: Position {pos_id} CLOSED via {exec_name}")
+                    else:
+                        # Just an update (like SL/TP amendment)
+                        print(f"DEBUG: Ignored {exec_name} for Pos {pos_id} (Still Open)")
+                        # Update local state anyway
+                        self._record_position(pos)
             
         # Order Error Event (2132)
         elif msg_type == Protobuf._names["ProtoOAOrderErrorEvent"]:
@@ -405,13 +420,18 @@ class CTraderBridge:
 
     def _update_account_info(self):
         """Requests latest equity and position state."""
-        if not self.authorized: return
-        self.client.send("ProtoOATraderReq", ctidTraderAccountId=self.account_id)
-        self.client.send("ProtoOAReconcileReq", ctidTraderAccountId=self.account_id)
+        if not self.authorized or not self.client: return
+        try:
+            self.client.send("ProtoOATraderReq", ctidTraderAccountId=self.account_id)
+            self.client.send("ProtoOAReconcileReq", ctidTraderAccountId=self.account_id)
+        except: pass
         
     def fetch_live_data(self):
-        """Fetches latest Trendbars (candles) for all TFs."""
+        """Fetches latest Trendbars (candles) for all TFs and refreshes equity."""
         if not self.authorized or not self.symbol_id: return
+        
+        # Fresh Equity Sync
+        self._update_account_info()
         
         print("\n⏳ Syncing Market Data...")
         
@@ -441,6 +461,12 @@ class CTraderBridge:
 
     def connect(self):
         """Initiates the Twisted Reactor and connects the client."""
+        if self.is_rate_limited and time.time() < self.rate_limit_reset:
+            wait_time = int(self.rate_limit_reset - time.time())
+            print(f"⏳ Still Rate Limited. Waiting {wait_time}s more...")
+            return False
+            
+        self.is_rate_limited = False
         host = EndPoints.PROTOBUF_LIVE_HOST if CTRADER_ENV == "LIVE" else EndPoints.PROTOBUF_DEMO_HOST
         port = 5035
         
@@ -464,6 +490,20 @@ class CTraderBridge:
             return False
             
         return True
+        
+    @property
+    def equity(self):
+        """Institutional Floating Equity: Balance + Floating PnL."""
+        try:
+            pnl = sum(getattr(p, 'grossProfit', 0) for p in self.open_positions) / 100.0
+            return self.current_balance + pnl
+        except:
+            return self.current_balance
+
+    @property
+    def current_equity(self):
+        """Alias for compatibility with run_live_demo.py."""
+        return self.equity
 
     def get_open_position_count(self) -> int:
         return len(self.open_positions)
@@ -475,26 +515,33 @@ class CTraderBridge:
             logger.error("Order Blocked: Bridge not ready.")
             return False
             
-        # Volume calculation: Standard cTrader API usually expects units.
-        # XAUUSD 1 Lot = 100 oz. Volume is usually in units (oz) or cents?
-        # If API expects units: 1 Lot = 100 units.
-        # If API expects cents: 1 Lot = 10000 cents.
-        # Let's try standard 100,000 multiplier first as it is most common for FX/Commds in ProtoOA.
-        # If volume step is 1.00 (unit), then int(lots * 100000) is safe.
-        volume = int(lots * 100000)
+        # Volume calculation: DYNAMIC SCALE based on Broker MinVol
+        # Multiplier: If min_volume=100 for 0.01 Lot, Multiplier=10,000.
+        # If min_volume=1000 for 0.01 Lot, Multiplier=100,000.
+        multiplier = self.min_volume / 0.01 if self.min_volume else 10000
         
-        logger.info(f"🚀 Preparing Order: {direction} {lots} Lots -> Volume {volume}")
+        # 📏 STEP ALIGNMENT: Round down to nearest step_volume to avoid API rejection
+        raw_volume = lots * multiplier
+        step = self.step_volume if self.step_volume > 0 else 1
+        volume = int((raw_volume // step) * step)
+        volume = max(volume, self.min_volume)
+        
+        logger.info(f"🚀 Preparing Order: {direction} {lots} Lots -> Volume {volume} (Step: {step})")
         trade_side = 1 if direction == "BUY" else 2
         
-        # Queue SL/TP for the amendment that happens in _on_message (ORDER_FILLED)
+        # Calculate SL/TP prices (Literal format)
         price = self.latest_ask if direction == "BUY" else self.latest_bid
+        sl_price = None
+        tp_price = None
+        
         if price and (sl_pips or tp_pips):
-            sl = (price - (sl_pips/10.0)) if direction == "BUY" else (price + (sl_pips/10.0))
-            tp = (price + (tp_pips/10.0)) if direction == "BUY" else (price - (tp_pips/10.0))
-            # Carry ATR/TF hints for BE/Trailing state seeding
+            sl_price = (price - (sl_pips/10.0)) if direction == "BUY" else (price + (sl_pips/10.0))
+            tp_price = (price + (tp_pips/10.0)) if direction == "BUY" else (price - (tp_pips/10.0))
+            
+            # Queue for fallback amendment
             self.pending_sl_tp = {
-                'sl': sl,
-                'tp': tp,
+                'sl': sl_price,
+                'tp': tp_price,
                 'direction': direction,
                 'atr': getattr(self, 'last_entry_atr', None),
                 'tf': getattr(self, 'last_entry_tf', None)
@@ -502,12 +549,19 @@ class CTraderBridge:
         
         print(f"🚀 [API] Transmitting {direction} {lots} Lots (Base Order)...")
         
-        self.client.send("ProtoOANewOrderReq",
-                         ctidTraderAccountId=self.account_id,
-                         symbolId=self.symbol_id,
-                         orderType=1,
-                         tradeSide=trade_side,
-                         volume=volume)
+        params = {
+            "ctidTraderAccountId": self.account_id,
+            "symbolId": self.symbol_id,
+            "orderType": 1,
+            "tradeSide": trade_side,
+            "volume": volume
+        }
+        
+        # Note: ProtoOANewOrderReq for MARKET orders often rejects absolute SL/TP.
+        # We will rely on self.pending_sl_tp which is applied in _on_message 
+        # as soon as ORDER_FILLED event arrives.
+
+        self.client.send("ProtoOANewOrderReq", **params)
         return True
 
     # --- BE / Trailing Helpers ---
@@ -519,11 +573,15 @@ class CTraderBridge:
             trade_data = getattr(pos, 'tradeData', None)
             if direction is None and trade_data:
                 direction = "BUY" if getattr(trade_data, 'tradeSide', 0) == 1 else "SELL"
+            def _smart_div(v):
+                if not v: return 0.0
+                return v / 100000.0 if v > 100000 else v
+
             volume_raw = getattr(trade_data, 'volume', getattr(pos, 'volume', 0))
-            lots = volume_raw / 10000.0 if volume_raw else 0
-            entry_price = getattr(pos, 'entryPrice', getattr(pos, 'price', 0)) / 100000.0
-            sl_val = getattr(pos, 'stopLoss', 0) / 100000.0 if getattr(pos, 'stopLoss', 0) else None
-            tp_val = getattr(pos, 'takeProfit', 0) / 100000.0 if getattr(pos, 'takeProfit', 0) else None
+            lots = volume_raw / 100000.0 if volume_raw else 0 # 100k units = 1 Lot
+            entry_price = _smart_div(getattr(pos, 'entryPrice', getattr(pos, 'price', 0)))
+            sl_val = _smart_div(getattr(pos, 'stopLoss', 0)) if getattr(pos, 'stopLoss', 0) else None
+            tp_val = _smart_div(getattr(pos, 'takeProfit', 0)) if getattr(pos, 'takeProfit', 0) else None
 
             st = self.position_state.get(pos_id, {})
             st.update({
@@ -553,20 +611,32 @@ class CTraderBridge:
             logger.error(f"State record error: {e}")
 
     def _amend_sl_tp(self, pos_id, new_sl=None, new_tp=None):
-        """Safe SL/TP amend helper."""
+        """Safe SL/TP amend helper - ensures existing values are preserved."""
         if not self.authorized or not self.symbol_id: 
             return False
-        if new_sl is None and new_tp is None:
+        
+        # Fetch current state to avoid clearing existing values
+        st = self.position_state.get(pos_id, {})
+        current_sl = st.get('sl')
+        current_tp = st.get('tp')
+
+        final_sl = new_sl if new_sl is not None else current_sl
+        final_tp = new_tp if new_tp is not None else current_tp
+
+        if final_sl is None and final_tp is None:
             return False
+
         params = {
             "ctidTraderAccountId": self.account_id,
             "positionId": pos_id
         }
-        if new_sl is not None:
-            params["stopLoss"] = round(new_sl, self.digits)
-        if new_tp is not None:
-            params["takeProfit"] = round(new_tp, self.digits)
+        if final_sl is not None:
+            params["stopLoss"] = round(float(final_sl), self.digits)
+        if final_tp is not None:
+            params["takeProfit"] = round(float(final_tp), self.digits)
+
         try:
+            logger.info(f"🛡️ Amending Pos {pos_id}: SL->{final_sl}, TP->{final_tp}")
             self.client.send("ProtoOAAmendPositionSLTPReq", **params)
             return True
         except Exception as e:
@@ -636,7 +706,7 @@ class CTraderBridge:
 
             # Trailing after BE
             if st.get('be_active', False):
-                trail_dist = atr_val * 2.0
+                trail_dist = atr_val * 1.5
                 if direction == "BUY":
                     candidate = st['high_water'] - trail_dist
                     candidate = min(candidate, price - 0.05)

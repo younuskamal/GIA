@@ -37,7 +37,7 @@ TIMEFRAME = os.getenv("TIMEFRAME", "M1")
 TIMEZONE = os.getenv("TIMEZONE", "UTC")
 
 # 📂 Paths
-DATA_DIR = os.getenv("DATA_DIR", r"C:\GIA_DATA")
+DATA_DIR = PROJECT_ROOT / "data"
 MODELS_DIR = BASE_DIR / "models"
 MODEL_PATH = MODELS_DIR / "GIA_SIGNAL_PRO.pkl"
 

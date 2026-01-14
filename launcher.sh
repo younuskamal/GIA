@@ -1,10 +1,10 @@
-
 #!/bin/bash
 cd /var/www/GIA
-source venv/bin/activate
+# Use absolute path for python from venv
+PYTHON_EXE="/var/www/GIA/venv/bin/python"
 while true; do
-    echo "Starting GIA..." >> loop.log
-    python3 run_live_demo.py --model_idx P --risk 1.0 --lev 100 --guard 80 >> loop.log 2>&1
-    echo "GIA Crashed. Restarting in 5s..." >> loop.log
-    sleep 5
+    echo "[$(date)] Starting GIA..." >> loop.log
+    $PYTHON_EXE run_live_demo.py --model_idx 5 --risk 1.0 --lev 100 --guard 0 >> loop.log 2>&1
+    echo "[$(date)] GIA Crashed or Stopped. Restarting in 10s..." >> loop.log
+    sleep 10
 done

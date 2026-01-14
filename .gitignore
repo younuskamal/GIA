@@ -45,6 +45,10 @@ backend/data/history/**
 !package.json
 !composer.json
 active_trading.log
+live_audit.log*
+loop.log*
+*.log
+/tmp/gia_screen_dump.txt
 trades_history.json
 
 # IDEs

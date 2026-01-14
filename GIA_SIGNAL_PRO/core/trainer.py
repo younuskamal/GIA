@@ -242,12 +242,13 @@ class GIA_Apex_Distiller:
             reg_alpha=0.1,
             reg_lambda=0.5,
             max_delta_step=5,        # High stability for heavy weighting
+            early_stopping_rounds=150, # Moved to constructor for XGBoost 2.0+
             random_state=42
         )
         
         print(f"🛠️ Phase 1: Training Predator UHF Core on {len(X_train)} pulses...")
         model.fit(X_train, y_train, sample_weight=weights, 
-                  eval_set=[(X_val, y_val)], early_stopping_rounds=150, verbose=100)
+                  eval_set=[(X_val, y_val)], verbose=100)
         
         print("⚖️ Initializing High-Resolution Calibration...")
         calibrator = ConfidenceCalibrator()
@@ -268,9 +269,17 @@ class GIA_Apex_Distiller:
         }
         
         PREDATOR_PATH = MODELS_DIR / "GIA_SIGNAL_PREDATOR.pkl"
+        LIVE_PRO_PATH = PROJECT_ROOT / "backend" / "models" / "GIA_v2_PRO.pkl"
+        
         os.makedirs(os.path.dirname(PREDATOR_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(LIVE_PRO_PATH), exist_ok=True)
+        
+        # Save to both locations
         joblib.dump(save_data, PREDATOR_PATH)
+        joblib.dump(save_data, LIVE_PRO_PATH)
+        
         print(f"✅ GIA_SIGNAL_PREDATOR v1.0.1 SAVED: {PREDATOR_PATH}")
+        print(f"🧠 NEURAL LINK: Live PRO model updated at {LIVE_PRO_PATH}")
 
 if __name__ == "__main__":
     trainer = GIA_Apex_Distiller()

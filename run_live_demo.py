@@ -1,5 +1,4 @@
-
-"""
+r"""
 GIA Production Engine - DIRECT API EXECUTION
 Standard: XAUUSD M15 (LOCKED)
 Sync: Local CSV (C:\GIA_DATA) + Direct OpenAPI 
@@ -144,10 +143,12 @@ GIA Institutional Live Demo - Professional Execution Logic
     if choice == 'C':
         analyzer = TripleConsensusModel(models_main_dir)
         telegram_service.active_model_name = "Triple Consensus"
+        telegram_service._save_state()
     elif choice == 'P':
         analyzer = EliteDuoEngine(models_main_dir)
         is_duo_mode = True
         telegram_service.active_model_name = "Elite Duo (Pro+Flash)"
+        telegram_service._save_state()
         print(f"   {Fore.CYAN}💎 ELITE DUO ACTIVATED: Harmonizing PRO (M15) & FLASH (M1).{Style.RESET_ALL}")
     elif choice.isdigit() and 1 <= int(choice) <= len(all_models):
         m_name = all_models[int(choice)-1]
@@ -157,6 +158,7 @@ GIA Institutional Live Demo - Professional Execution Logic
             global TIMEFRAME
             TIMEFRAME = "M1"
         telegram_service.active_model_name = m_name
+        telegram_service._save_state()
     else:
         print(f"{Fore.RED}❌ ERROR: Invalid Model Selection. Use 1-{len(all_models)}, C or P.{Style.RESET_ALL}")
         return
@@ -170,16 +172,37 @@ GIA Institutional Live Demo - Professional Execution Logic
     telegram_service.start_listener()
     telegram_service.broadcast("🚀 <b>GIA Institutional Engine Starting...</b>", include_keyboard=True)
 
-    if not bridge.connect():
-        print(f"{Fore.RED}❌ FAILED: cTrader OpenAPI Connection Refused. Ensure Proxy/Terminal is running.{Style.RESET_ALL}")
-        telegram_service.notify_emergency("cTrader Connection Refused")
-        return
+    # Initial connection attempt - handled by self-healing loop if it fails
+    has_connected = bridge.connect()
     
-    print("⏳ Waiting for cTrader API Readiness (Authorization & Symbols)...")
-    if not bridge.ready_event.wait(timeout=30):
-        print(f"{Fore.YELLOW}⚠️ WARNING: Bridge ready_event timeout. Attempting to proceed...{Style.RESET_ALL}")
+    if not has_connected:
+        print(f"{Fore.YELLOW}⚠️  Initial Connect Failed. Reconnection loop will take over...{Style.RESET_ALL}")
+    else:
+        print("⏳ Waiting for cTrader API Readiness (Authorization & Symbols)...")
+        if not bridge.ready_event.wait(timeout=30):
+            print(f"{Fore.YELLOW}⚠️ WARNING: Bridge ready_event timeout. Attempting to proceed...{Style.RESET_ALL}")
+        else:
+            telegram_service.broadcast("✅ <b>GIA Connected & Authorized. Monitoring Market...</b>")
     
-    telegram_service.broadcast("✅ <b>GIA Connected & Authorized. Monitoring Market...</b>")
+    # 🦁 INITIAL VISION SYNC: Force an immediate analysis cycle on startup
+    print(f"📡 Performing Initial Market Analysis Cycle...")
+    bridge.fetch_live_data()
+    time.sleep(5) # Give time for data to arrive
+    try:
+        init_res = analyzer.analyze(record_trade=False)
+        if init_res['success']:
+            telegram_service.update_market_status(
+                signal=init_res['signal'],
+                confidence=init_res.get('confidence', 0),
+                rsi=init_res.get('rsi', 50),
+                vol_regime=init_res.get('vol_regime', 1.0),
+                news_safe=init_res.get('news_safe', True)
+            )
+            print(f"✅ Initial Vision Synced to Telegram: {init_res['signal']} | Conf: {init_res.get('confidence', 0):.2f}")
+        else:
+            print(f"❌ Initial Analysis Failed: {init_res.get('error', 'Unknown Error')}")
+    except Exception as e:
+        print(f"⚠️ Initial Analysis Skip: {e}")
 
     # State Synchronizer
     if not hasattr(run_production_engine, 'processed_dict'):
@@ -212,6 +235,8 @@ GIA Institutional Live Demo - Professional Execution Logic
     last_check_time = time.time()
     last_sync_time = 0
     last_daily_report_day = datetime.now().day
+    retry_count = 0
+    max_retry_delay = 300
     
     if is_consensus:
         mode_name = "TRIPLE CONSENSUS"
@@ -234,13 +259,24 @@ GIA Institutional Live Demo - Professional Execution Logic
             try:
                 # 1. Heartbeat & Stability Check
                 if not bridge.connected:
-                    print(f"\n{Fore.RED}⚠️ CONNECTION LOST! Attempting Self-Healing Reconnect...{Style.RESET_ALL}")
+                    if getattr(bridge, 'is_rate_limited', False) and time.time() < bridge.rate_limit_reset:
+                        wait_rem = int(bridge.rate_limit_reset - time.time())
+                        if wait_rem % 30 == 0: # Log every 30s
+                            print(f"\n{Fore.YELLOW}⏳ GIA Paused: API Rate Limit in effect. {wait_rem}s remaining...{Style.RESET_ALL}")
+                        time.sleep(1)
+                        continue
+
+                    print(f"\n{Fore.RED}⚠️ CONNECTION LOST! Attempting Self-Healing Reconnect (Attempt {retry_count+1})...{Style.RESET_ALL}")
                     if bridge.connect():
                         print(f"{Fore.GREEN}✅ RECONNECTED SUCCESSFULLY.{Style.RESET_ALL}")
                         telegram_service.notify_connection_status(True)
+                        retry_count = 0
                     else:
-                        telegram_service.notify_emergency("Connection Lost - Reconnect Failed")
-                        time.sleep(5)
+                        retry_count += 1
+                        delay = min(max_retry_delay, 5 * (2 ** (retry_count - 1)))
+                        print(f"{Fore.YELLOW}❌ Reconnect Failed. Retrying in {delay}s...{Style.RESET_ALL}")
+                        telegram_service.notify_emergency(f"Connection Lost - Retry in {delay}s")
+                        time.sleep(delay)
                         continue
 
                 now = datetime.now()
@@ -257,11 +293,26 @@ GIA Institutional Live Demo - Professional Execution Logic
                     bridge.fetch_live_data()
                     last_sync_time = time.time()
                     
+                    # 🦁 LIVE VISION SYNC: Update dashboard metrics every minute
+                    try:
+                        check_analyzer = analyzer.pro if is_duo_mode else analyzer
+                        res = check_analyzer.analyze(record_trade=False)
+                        if res['success']:
+                            telegram_service.update_market_status(
+                                signal=res['signal'],
+                                confidence=res.get('confidence', 0),
+                                rsi=res.get('rsi', 50),
+                                vol_regime=res.get('vol_regime', 1.0),
+                                news_safe=res.get('news_safe', True)
+                            )
+                    except Exception as e:
+                        logging.warning(f"Dashboard sync error: {e}")
+
                     # 🔔 DUO/PRO PRE-ALERT
                     if now.minute % 15 == 13 and now.second < 15:
                         try:
                             check_analyzer = analyzer.pro if is_duo_mode else analyzer
-                            res = check_analyzer.analyze() 
+                            res = check_analyzer.analyze(record_trade=False) 
                             if res['success'] and res['signal'] in ['BUY', 'SELL'] and res.get('confidence', 0) > 65:
                                 telegram_service.notify_pre_alert(res['signal'], f"Duo-Formation: Strong {res['signal']}", res.get('confidence',0))
                                 time.sleep(15)
@@ -277,13 +328,12 @@ GIA Institutional Live Demo - Professional Execution Logic
                         triggers.append({'tf': 'M15', 'model': analyzer.pro, 'name': 'PRO'})
                 else:
                     is_triggered = False
-                    if TIMEFRAME == "M1":
-                        if 5 <= now.second <= 25: is_triggered = True
-                    else:
-                        if now.minute % 15 == 0 and 5 <= now.second <= 25: is_triggered = True
+                    # 🦁 ADAPTIVE PULSE: Check every minute to capture high-conviction moves ASAP
+                    if 5 <= now.second <= 25: 
+                        is_triggered = True
                     
                     if is_triggered:
-                        triggers.append({'tf': TIMEFRAME, 'model': analyzer, 'name': 'SINGLE'})
+                        triggers.append({'tf': TIMEFRAME, 'model': analyzer, 'name': 'ADAPTIVE'})
                         
                 for trigger in triggers:
                     target_tf = trigger['tf']
@@ -291,12 +341,16 @@ GIA Institutional Live Demo - Professional Execution Logic
                     target_csv = f"{ASSET}_{target_tf}.csv"
                     ts = get_latest_ts(target_csv)
                     
-                    if ts and ts != run_production_engine.processed_dict.get(target_tf):
+                    # 🦁 ADAPTIVE SYNC: Use minute-based key to ensure we probe once per minute
+                    # even if the CSV timestamp (candle start) hasn't moved yet.
+                    pulse_key = f"{target_tf}_{now.minute}"
+                    
+                    if ts and pulse_key != run_production_engine.processed_dict.get(target_tf):
                         # 🦁 INSTITUTIONAL SAFETY: Ignore old data from before market open
                         try:
                             sig_dt = datetime.strptime(ts, '%Y-%m-%d %H:%M:%S')
                             if (datetime.now() - sig_dt).total_seconds() > 1800: # Older than 30m
-                                run_production_engine.processed_dict[target_tf] = ts
+                                run_production_engine.processed_dict[target_tf] = pulse_key
                                 continue
                         except: pass
                         
@@ -372,7 +426,8 @@ GIA Institutional Live Demo - Professional Execution Logic
                                 sl_pips, tp_pips = sl_val * 10, tp_val * 10
 
                                 risk_usd = equity * (current_risk / 100.0) * size_mult
-                                lots = max(0.01, round(risk_usd / (100 * sl_val), 2))
+                                calculated_lots = round(risk_usd / (100 * sl_val), 2)
+                                lots = min(10.0, max(0.01, calculated_lots))
                                 regime_name = {0: "RANGE", 1: "TREND", 2: "HIGH_VOL"}.get(regime_flag, "UNKNOWN")
                                 logging.info(f"💎 Precision Risk Logic: ATR={atr:.4f} | Regime={regime_name} | SLx{sl_mult} TPx{tp_mult} | Lots={lots}")
                                 print(f"   📏 SIZING: Regime={regime_name} | SLx{sl_mult} TPx{tp_mult} | Lots: {lots}")
@@ -392,6 +447,7 @@ GIA Institutional Live Demo - Professional Execution Logic
                                     continue
 
                                 # D. Order Transmission
+                                print(f"   🎯 EXECUTION ATTEMPT: {signal} {lots} Lots | Bridge Ready: {bridge.ready_event.is_set()}")
                                 print(f"   🎯 EXECUTION: {signal} {lots} Lots | SL: {round(sl_pips,1)} | TP: {round(tp_pips,1)}")
                                 bridge.last_entry_atr = atr
                                 bridge.last_entry_tf = target_tf
@@ -402,7 +458,7 @@ GIA Institutional Live Demo - Professional Execution Logic
                             logging.error(f"Analysis Failed [{trigger['name']}]: {err}")
 
                         # E. Clean State
-                        run_production_engine.processed_dict[target_tf] = ts
+                        run_production_engine.processed_dict[target_tf] = pulse_key
                         last_check_time = time.time()
                 else:
                     # If M15 isn't updated yet, we wait and retry sync
